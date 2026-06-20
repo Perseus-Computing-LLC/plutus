@@ -79,9 +79,10 @@ def deepseek_balance(api_key):
             "topped_up_usd": float(usd.get("topped_up_balance", 0) or 0),
             "available": bool(data.get("is_available")),
             "ok": True,
+            "source": "live",
         }
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": str(e), "source": "estimate"}
 
 def openai_balance(api_key):
     """OpenAI balance via billing subscription endpoint.
@@ -91,7 +92,7 @@ def openai_balance(api_key):
         data = _get("https://api.openai.com/v1/dashboard/billing/subscription",
                     {"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
         if data.get("object") == "error":
-            return {"ok": False, "error": data.get("message")}
+            return {"ok": False, "error": data.get("message"), "source": "estimate"}
         total_granted = data.get("hard_limit_usd", 0)
         total_used = data.get("total_usage", 0)
         return {
@@ -100,18 +101,31 @@ def openai_balance(api_key):
             "topped_up_usd": None,
             "available": True,
             "ok": True,
+            "source": "live",
         }
     except urllib.error.HTTPError as e:
         if e.code in (403, 404):
-            return {"ok": False, "error": f"OpenAI API returned {e.code} (no billing details or invalid key)"}
-        return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": f"OpenAI API returned {e.code} (no billing details or invalid key)", "source": "estimate"}
+        return {"ok": False, "error": str(e), "source": "estimate"}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": str(e), "source": "estimate"}
 
-# provider name in config -> (balance fetcher, ledger billing_provider aliases)
+def anthropic_balance(api_key):
+    """Anthropic — no public balance API yet (github.com/anthropics/anthropic-sdk-python/issues/505).
+    Always returns estimate; use budget-based remaining instead."""
+    return {"ok": False, "source": "estimate", "note": "Anthropic has no public balance API — using budget estimates"}
+
+def google_balance(api_key):
+    """Google Gemini — AI Studio prepay credits, no simple balance REST endpoint.
+    Always returns estimate; use budget-based remaining instead."""
+    return {"ok": False, "source": "estimate", "note": "Google AI Studio uses prepay credits — using budget estimates"}
+
+# provider name -> balance fetcher (returns {balance_usd, ok, source: 'live'|'estimate'})
 BALANCE_FETCHERS = {
-    "deepseek": deepseek_balance,
-    "openai":   openai_balance,
+    "deepseek":  deepseek_balance,
+    "openai":    openai_balance,
+    "anthropic": anthropic_balance,
+    "google":    google_balance,
 }
 # map config provider name -> the billing_provider strings seen in state.db
 LEDGER_ALIASES = {
@@ -202,10 +216,9 @@ def collect():
         fetcher = BALANCE_FETCHERS.get(name)
         if fetcher and providers.get(name, {}).get("api_key"):
             bal = fetcher(providers[name]["api_key"])
+            entry["source"] = bal.get("source", "estimate")
             if bal.get("ok"):
                 entry["balance"] = bal["balance_usd"]
-                entry["source"] = "live"
-                entry["balance_detail"] = bal
             else:
                 entry["balance_error"] = bal.get("error")
         # budget-based remaining for no-balance providers
@@ -267,6 +280,8 @@ def render_cli(data, color=True):
                 f"{fmt_usd(e.get('burn_per_day')):>8} {days_s:>6} {e['source']}")
         if e["source"] == "live":
             line = c(line, "32")
+        elif e["source"] == "estimate":
+            line = c(line, "33")  # yellow
         elif days is not None and days < 7:
             line = c(line, "31")
         lines.append(line)
@@ -279,7 +294,7 @@ def render_cli(data, color=True):
         lines.append(c(f"  ledger note: {data['ledger_error']}", "33"))
     lines.append("")
     lines.append("  live  = real balance from provider API")
-    lines.append("  remain = budget - all-time ledger spend (set budgets in plutus.budgets.json)")
+    lines.append("  est   = estimate (budget - spend, no live API — set budgets in plutus.budgets.json)")
     return "\n".join(lines)
 
 def render_html(data):
@@ -292,10 +307,13 @@ def render_html(data):
         for k in tot:
             tot[k] += s.get(k, 0)
         days = e.get("days_left")
-        cls = "live" if e["source"] == "live" else ("warn" if (days is not None and days < 7) else "")
+        src = e["source"]
+        cls = "live" if src == "live" else ("warn" if (days is not None and days < 7) else "")
         days_s = "∞" if days is None else f"{days:.0f}"
         bal = fmt_usd(e["balance"]); rem = fmt_usd(e["remaining"])
-        badge = '<span class="b live">LIVE</span>' if e["source"] == "live" else '<span class="b">ledger</span>'
+        badge_cls = {"live": "b live", "estimate": "b est", "ledger": "b"}.get(src, "b")
+        badge_label = {"live": "LIVE", "estimate": "EST", "ledger": "ledger"}.get(src, src)
+        badge = f'<span class="{badge_cls}">{badge_label}</span>'
         tr.append(f"""<tr class="{cls}">
 <td class="prov">{e['provider']} {badge}</td>
 <td class="num big">{bal}</td><td class="num">{rem}</td>
@@ -321,8 +339,7 @@ th:first-child,td:first-child{{text-align:left}}
 .big{{font-size:16px;color:var(--gold)}}
 .prov{{font-weight:600}}
 .b{{font-size:10px;padding:2px 7px;border-radius:20px;background:#222838;color:var(--dim);margin-left:8px;vertical-align:middle}}
-.b.live{{background:rgba(45,212,167,.15);color:var(--green)}}
-tr.live .big{{color:var(--green)}}
+.b.live{{background:rgba(45,212,167,.15);color:var(--green)}}\n.b.est{{background:rgba(233,196,106,.15);color:var(--gold)}}\ntr.live .big{{color:var(--green)}}
 tr.warn td{{background:rgba(239,100,97,.06)}}
 tr.warn .num{{color:var(--red)}}
 tfoot td{{font-weight:700;background:#11141c;border-bottom:none}}
@@ -339,7 +356,7 @@ tfoot td{{font-weight:700;background:#11141c;border-bottom:none}}
 <td class="num">{fmt_usd(tot['today'])}</td><td class="num">{fmt_usd(tot['7d'])}</td>
 <td class="num">{fmt_usd(tot['30d'])}</td><td class="num">{fmt_usd(tot['all'])}</td><td></td><td></td></tr></tfoot></table>
 {note}
-<p class="legend"><b>LIVE</b> = real balance pulled from the provider API · <b>Remaining</b> = budget − all-time ledger spend (set budgets in plutus.budgets.json) · <b>$/day</b> = trailing 7-day burn · <b>Days left</b> = balance ÷ burn.</p>
+<p class="legend"><b>LIVE</b> = real balance pulled from the provider API · <b>EST</b> = estimate (budget − spend, no live API) · <b>$/day</b> = trailing 7-day burn · <b>Days left</b> = balance ÷ burn.</p>
 </div></body></html>"""
 
 def snapshot(data):
@@ -349,6 +366,7 @@ def snapshot(data):
         rec[e["provider"]] = {
             "bal": e["balance"], "rem": e["remaining"],
             "all": round(e["spend"].get("all", 0), 4),
+            "src": e["source"],
         }
     with open(SNAPSHOT_FILE, "a", encoding='utf-8') as f:
         f.write(json.dumps(rec) + "\n")
