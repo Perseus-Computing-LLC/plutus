@@ -1,0 +1,15 @@
+# Plutus artifacts — environment-specific, never commit
+plutus.budgets.json
+plutus.snapshots.jsonl
+plutus.routing.jsonl
+plutus.routing.log
+plutus.html
+plutus.err
+*.plutus-bak-*
+config.yaml.plutus-bak-*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

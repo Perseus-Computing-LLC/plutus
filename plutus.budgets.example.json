@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to plutus.budgets.json and set the real starting credit for each provider that has NO live balance API. Plutus computes remaining = budget_usd - all-time ledger spend. Recalibrate anytime with: python3 plutus.py --calibrate anthropic=NN.NN",
+  "anthropic": {"budget_usd": 0, "note": "set to your Anthropic console credit"},
+  "google": {"budget_usd": 0, "note": "set to your Google AI Studio / Vertex credit"}
+}
