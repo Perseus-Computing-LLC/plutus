@@ -494,19 +494,18 @@ def do_tokens(text):
         print(f"Tokens (word count estimate): {tokens}")
 
 # ------------------------------------------------------------------ alert ---
-def do_alert(dry_run):
-    """Send low-balance email alert via Himalaya CLI."""
+def do_alert(dry_run, channel=None):
+    """Send low-balance alerts via configured channels (email, Discord, ntfy).
+    Supports --dry-run to print instead of send.
+    Supports --channel <name> to restrict to a specific channel."""
     budgets = load_budgets()
     data = collect()
+    alerts_cfg = budgets.get("alerts", {})
 
-    alerts_cfg = budgets.get("alerts", {}).get("email", {})
-    to_email = alerts_cfg.get("to")
-    balance_threshold_usd = alerts_cfg.get("balance_threshold_usd")
-    days_left_threshold = alerts_cfg.get("days_left_threshold")
-
-    if not to_email:
-        print("No email recipient configured. Add 'alerts.email.to' in plutus.budgets.json.")
-        return
+    # Gather alert conditions (same for all channels)
+    email_cfg = alerts_cfg.get("email", {})
+    balance_threshold_usd = email_cfg.get("balance_threshold_usd")
+    days_left_threshold = email_cfg.get("days_left_threshold")
 
     alert_messages = []
     for e in data["providers"]:
@@ -530,33 +529,78 @@ def do_alert(dry_run):
             "\n".join(alert_messages) +
             "\n\nCheck `plutus` for full details.\n")
 
-    if dry_run:
-        print("--- DRY RUN: Email Alert ---")
-        print(f"To: {to_email}")
-        print(f"Subject: {subject}")
-        print("Body:")
-        print(body)
-        print("----------------------------")
-        return
+    sent = 0
 
-    try:
-        cmd = ["himalaya", "send", "-t", to_email, "-s", subject, "-"]
-        proc = subprocess.run(cmd, input=body.encode("utf-8"),
-                              capture_output=True, timeout=30)
-        if proc.returncode == 0:
-            print(f"Email alert sent to {to_email}.")
-        else:
-            print(f"Himalaya exited with code {proc.returncode}.")
-            if proc.stdout:
-                print("stdout:", proc.stdout.decode().strip())
-            if proc.stderr:
-                print("stderr:", proc.stderr.decode().strip())
-    except FileNotFoundError:
-        print("Error: 'himalaya' command not found. Install Himalaya CLI for email alerts.")
-    except subprocess.TimeoutExpired:
-        print("Error: Himalaya timed out after 30 seconds.")
-    except Exception as e:
-        print(f"Error sending email alert: {e}")
+    # ---- Email (Himalaya) ----
+    if not channel or channel == "email":
+        to_email = email_cfg.get("to")
+        if to_email:
+            if dry_run:
+                print("--- DRY RUN: Email ---")
+                print(f"To: {to_email}\nSubject: {subject}\n{body}")
+                print("-----------------------")
+            else:
+                try:
+                    cmd = ["himalaya", "send", "-t", to_email, "-s", subject, "-"]
+                    proc = subprocess.run(cmd, input=body.encode("utf-8"),
+                                          capture_output=True, timeout=30)
+                    if proc.returncode == 0:
+                        print(f"Email alert sent to {to_email}.")
+                        sent += 1
+                    else:
+                        print(f"Himalaya exited with code {proc.returncode}: {proc.stderr.decode().strip()}")
+                except FileNotFoundError:
+                    print("Error: 'himalaya' not found. Install Himalaya CLI for email alerts.")
+                except subprocess.TimeoutExpired:
+                    print("Error: Himalaya timed out.")
+                except Exception as e:
+                    print(f"Error sending email: {e}")
+
+    # ---- Discord webhook ----
+    if not channel or channel == "discord":
+        discord_cfg = alerts_cfg.get("discord", {})
+        webhook_url = discord_cfg.get("webhook_url")
+        if webhook_url:
+            discord_body = f"**{subject}**\n\n{body}"
+            if dry_run:
+                print("--- DRY RUN: Discord ---")
+                print(f"Webhook URL: {webhook_url[:60]}...\n{discord_body}")
+                print("-------------------------")
+            else:
+                try:
+                    req_data = json.dumps({"content": discord_body}).encode("utf-8")
+                    req = urllib.request.Request(webhook_url, data=req_data,
+                        headers={"Content-Type": "application/json"})
+                    urllib.request.urlopen(req, timeout=10)
+                    print("Discord alert sent.")
+                    sent += 1
+                except Exception as e:
+                    print(f"Error sending Discord alert: {e}")
+
+    # ---- ntfy ----
+    if not channel or channel == "ntfy":
+        ntfy_cfg = alerts_cfg.get("ntfy", {})
+        ntfy_topic = ntfy_cfg.get("topic")
+        ntfy_server = ntfy_cfg.get("server", "https://ntfy.sh")
+        if ntfy_topic:
+            ntfy_url = f"{ntfy_server}/{ntfy_topic}"
+            if dry_run:
+                print("--- DRY RUN: ntfy ---")
+                print(f"URL: {ntfy_url}\nSubject: {subject}\n{body}")
+                print("----------------------")
+            else:
+                try:
+                    req_data = body.encode("utf-8")
+                    req = urllib.request.Request(ntfy_url, data=req_data,
+                        headers={"Title": subject, "Priority": "high"})
+                    urllib.request.urlopen(req, timeout=10)
+                    print(f"ntfy alert sent to {ntfy_topic}.")
+                    sent += 1
+                except Exception as e:
+                    print(f"Error sending ntfy alert: {e}")
+
+    if sent == 0 and not dry_run:
+        print("No alert channels configured. Add 'alerts' to plutus.budgets.json.")
 
 # ----------------------------------------------------------------- main ----
 VERSION = "0.1.1"
@@ -584,8 +628,14 @@ def main():
     tokens_ap.add_argument("text", help="text to count tokens for")
 
     # alert subcommand
-    alert_ap = subparsers.add_parser("alert", help="send low-balance alerts via email")
-    alert_ap.add_argument("--dry-run", action="store_true", help="print email instead of sending")
+    alert_ap = subparsers.add_parser("alert", help="send low-balance alerts via configured channels")
+    alert_ap.add_argument("--dry-run", action="store_true", help="print alerts instead of sending")
+    alert_ap.add_argument("--channel", choices=["email", "discord", "ntfy"],
+                          help="restrict to a specific channel (default: all configured)")
+    alert_ap.add_argument("--email", "--thresh", metavar="DOLLARS", type=float,
+                          help="override email balance threshold")
+    alert_ap.add_argument("--days", metavar="N", type=float,
+                          help="override email days-left threshold")
 
     args = ap.parse_args()
 
@@ -597,7 +647,7 @@ def main():
         do_tokens(args.text)
         return
     elif args.command == "alert":
-        do_alert(args.dry_run)
+        do_alert(args.dry_run, args.channel)
         return
 
     # Legacy --calibrate flag
