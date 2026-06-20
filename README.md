@@ -1,11 +1,32 @@
 # Plutus
 
+[![Test](https://github.com/Perseus-Computing-LLC/plutus/actions/workflows/test.yml/badge.svg)](https://github.com/Perseus-Computing-LLC/plutus/actions/workflows/test.yml)
+
 > Named for the Greek god of wealth. Plutus watches the money draining out of every LLM provider you use — and automatically balances your model routing toward the provider with the most runway.
 
 Plutus is a credit & spend monitor for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that does two things:
 
 1. **Monitors** — shows live balance, spend (today / 7d / 30d / all-time), burn rate, and projected days-left for every provider you care about, in one table.
 2. **Balances** — ranks providers by runway and rewrites Hermes model routing so the provider with the most credit runs its flagship as primary, while the others supply the best subtask/fallback models.
+
+## Quick demo
+
+```
+  ____  _       _
+ |  _ \| |_   _| |_ _   _ ___
+ | |_) | | | | | __| | | / __|   god of wealth
+ |  __/| | |_| | |_| |_| \__ \   provider credit monitor
+ |_|   |_|\__,_|\__|\__,_|___/
+  generated 2026-06-19 20:28:40
+
+PROVIDER        BALANCE     REMAIN     TODAY        7D       30D        ALL    $/DAY   DAYS SRC
+-----------------------------------------------------------------------------------------------
+deepseek         $57.20          —    $13.36    $67.63   $157.51    $157.51    $9.66      6 live
+anthropic             —          —    $43.61    $43.61    $43.61     $43.61    $6.23      ∞ ledger
+google                —          —     $0.01     $0.15     $0.15      $0.15    $0.02      ∞ ledger
+-----------------------------------------------------------------------------------------------
+TOTAL                                 $56.99   $111.40   $201.28    $201.28
+```
 
 ## Why
 
@@ -28,8 +49,9 @@ For providers without a balance API (Anthropic, Google), you supply a starting *
 # Monitor
 python3 plutus.py                 # pretty CLI table
 python3 plutus.py --json          # machine-readable
-python3 plutus.py --html out.html # dashboard
+python3 plutus.py --html out.html # HTML dashboard
 python3 plutus.py --snapshot      # append burn-rate history
+python3 plutus.py --version       # print version
 
 # Calibrate a no-balance-API provider against its real console balance
 python3 plutus.py --calibrate anthropic=74.46 --calibrate google=93.59
@@ -37,6 +59,7 @@ python3 plutus.py --calibrate anthropic=74.46 --calibrate google=93.59
 # Balance model routing by runway
 python3 plutus_route.py --dry-run # preview the routing decision (no write)
 python3 plutus_route.py --apply   # rewrite Hermes config.yaml routing
+python3 plutus_route.py --version # print version
 ```
 
 ## Routing policy
@@ -48,6 +71,8 @@ python3 plutus_route.py --apply   # rewrite Hermes config.yaml routing
 - **Fallbacks** = the other two providers, flagship first, fast model second
 
 Every config write is **backed up first**, **refuses to write if any provider block or API key would be lost**, and **re-verifies the round-trip** after writing. A no-op guard skips the write entirely when the routing decision hasn't changed.
+
+Model IDs are configurable — override them in `plutus.budgets.json` under `models.flagship` and `models.subtask` to update when providers deprecate models without touching code.
 
 ## Configuration
 
@@ -72,7 +97,8 @@ Plutus is designed to run on a schedule (e.g. a Hermes cron job). The included `
 | `plutus.py` | The monitor (balance + spend + runway + calibrate) |
 | `plutus_route.py` | The balancing arm (runway-based routing) |
 | `plutus-refresh.sh` | Cron driver: refresh dashboard + rebalance |
-| `plutus.budgets.example.json` | Template for per-provider budgets |
+| `plutus.budgets.example.json` | Template for per-provider budgets + model overrides |
+| `test_plutus.py` | Test suite |
 
 ## Adding a live-balance provider
 

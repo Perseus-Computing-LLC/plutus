@@ -44,7 +44,7 @@ FOCUS_PROVIDERS = [p.strip() for p in os.environ.get(
 def load_yaml(path):
     try:
         import yaml
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             return yaml.safe_load(f) or {}
     except Exception as e:
         sys.stderr.write(f"plutus: could not read config {path}: {e}\n")
@@ -55,7 +55,7 @@ def load_budgets():
     Format: {"anthropic": {"budget_usd": 250.0, "note": "console grant"}, ...}"""
     if os.path.exists(BUDGETS_FILE):
         try:
-            return json.load(open(BUDGETS_FILE))
+            return json.load(open(BUDGETS_FILE, encoding='utf-8'))
         except Exception as e:
             sys.stderr.write(f"plutus: bad budgets file {BUDGETS_FILE}: {e}\n")
     return {}
@@ -323,7 +323,7 @@ def snapshot(data):
             "bal": e["balance"], "rem": e["remaining"],
             "all": round(e["spend"].get("all", 0), 4),
         }
-    with open(SNAPSHOT_FILE, "a") as f:
+    with open(SNAPSHOT_FILE, "a", encoding='utf-8') as f:
         f.write(json.dumps(rec) + "\n")
     return SNAPSHOT_FILE
 
@@ -359,7 +359,7 @@ def calibrate(pairs):
     budgets.setdefault("_comment",
         "budget_usd = starting/known credit. remaining = budget - all-time ledger spend. "
         "Recalibrate with: python3 plutus.py --calibrate anthropic=NN.NN")
-    with open(BUDGETS_FILE, "w") as f:
+    with open(BUDGETS_FILE, "w", encoding='utf-8') as f:
         json.dump(budgets, f, indent=2)
     for prov, bal, spent, budget in out:
         print(f"calibrated {prov}: reported balance ${bal:.2f} "
@@ -367,8 +367,11 @@ def calibrate(pairs):
     return out
 
 # ----------------------------------------------------------------- main ----
+VERSION = "0.1.0"
+
 def main():
     ap = argparse.ArgumentParser(description="Plutus — provider credit & spend monitor")
+    ap.add_argument("--version", action="version", version=f"plutus v{VERSION}")
     ap.add_argument("--json", action="store_true", help="emit raw JSON")
     ap.add_argument("--html", metavar="PATH", help="write HTML dashboard to PATH")
     ap.add_argument("--snapshot", action="store_true", help="append a history snapshot")
@@ -382,7 +385,7 @@ def main():
         calibrate(args.calibrate)
         # refresh dashboard after recalibration
         data = collect()
-        with open(os.path.join(HERE, "plutus.html"), "w") as f:
+        with open(os.path.join(HERE, "plutus.html"), "w", encoding='utf-8') as f:
             f.write(render_html(data))
         print()
         print(render_cli(data, color=not args.no_color))
@@ -392,7 +395,7 @@ def main():
     if args.snapshot:
         snapshot(data)
     if args.html:
-        with open(args.html, "w") as f:
+        with open(args.html, "w", encoding='utf-8') as f:
             f.write(render_html(data))
         sys.stderr.write(f"plutus: wrote {args.html}\n")
     if args.json:

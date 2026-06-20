@@ -31,7 +31,10 @@ CONFIG = os.environ.get("PLUTUS_HERMES_CONFIG",
 PLUTUS = os.path.join(HERE, "plutus.py")
 ROUTE_LOG = os.path.join(HERE, "plutus.routing.jsonl")
 
+VERSION = "0.1.0"
+
 # Verified model catalogs (from live /models calls 2026-06-19).
+# Override any provider's model via plutus.budgets.json → models.flagship / models.subtask.
 FLAGSHIP = {
     "deepseek":  "deepseek-v4-pro",
     "anthropic": "claude-opus-4-8",
@@ -42,6 +45,23 @@ SUBTASK = {  # fast / cheaper model for delegation + light fallbacks
     "anthropic": "claude-sonnet-4-5-20250929",
     "google":    "gemini-2.5-flash",
 }
+
+def _load_models():
+    """Merge model overrides from plutus.budgets.json into FLAGSHIP/SUBTASK defaults."""
+    budgets_path = os.environ.get("PLUTUS_BUDGETS",
+                                   os.path.join(HERE, "plutus.budgets.json"))
+    try:
+        if os.path.exists(budgets_path):
+            cfg = json.load(open(budgets_path, encoding='utf-8'))
+            models = cfg.get("models", {})
+            for kind, target in (("flagship", FLAGSHIP), ("subtask", SUBTASK)):
+                if kind in models and isinstance(models[kind], dict):
+                    for prov, model_id in models[kind].items():
+                        target[prov] = model_id
+    except Exception:
+        pass  # budgets.json is optional; defaults are always present
+
+_load_models()
 PROVIDERS = ["deepseek", "anthropic", "google"]
 
 
@@ -72,7 +92,7 @@ def runway():
 
 def load_yaml(path):
     import yaml
-    with open(path) as f:
+    with open(path, encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
@@ -152,7 +172,7 @@ def apply(cfg_path, p, providers_cfg, dry=False):
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = f"{cfg_path}.plutus-bak-{ts}"
     shutil.copy2(cfg_path, backup)
-    with open(cfg_path, "w") as f:
+    with open(cfg_path, "w", encoding='utf-8') as f:
         yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
 
     # re-read & re-verify round-trip
@@ -164,8 +184,13 @@ def apply(cfg_path, p, providers_cfg, dry=False):
 
 
 def main():
-    dry = "--dry-run" in sys.argv
-    apply_flag = "--apply" in sys.argv
+    import argparse
+    ap = argparse.ArgumentParser(description="Plutus route — credit-aware model routing for Hermes")
+    ap.add_argument("--version", action="version", version=f"plutus v{VERSION}")
+    ap.add_argument("--dry-run", action="store_true", help="preview routing without writing config")
+    ap.add_argument("--apply", action="store_true", help="write routing to config.yaml")
+    args = ap.parse_args()
+    dry = args.dry_run
     rw, data = runway()
     providers_cfg = load_yaml(CONFIG).get("providers", {})
     pl = plan(rw)
@@ -184,7 +209,7 @@ def main():
     print("FALLBACKS   " + " -> ".join(f"{p}/{m}" for p, m in pl["fallbacks"]))
     print()
 
-    if not (dry or apply_flag):
+    if not (dry or args.apply):
         print("No action. Re-run with --dry-run (preview write) or --apply (write config).")
         return
 
@@ -214,7 +239,7 @@ def main():
                "fallbacks": [f"{p}/{m}" for p, m in pl["fallbacks"]],
                "runway": {k: (None if v["days_left"] >= 1e8 else round(v["days_left"], 1))
                           for k, v in rw.items()}}
-        with open(ROUTE_LOG, "a") as f:
+        with open(ROUTE_LOG, "a", encoding='utf-8') as f:
             f.write(json.dumps(rec) + "\n")
         print(f"APPLIED. Backup: {backup}")
         print(f"  model.default = {cfg['model']['default']}")

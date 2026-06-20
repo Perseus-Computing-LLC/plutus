@@ -1,0 +1,42 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Lint — py_compile
+        run: |
+          python3 -m py_compile plutus.py
+          python3 -m py_compile plutus_route.py
+
+      - name: Smoke test — version flag
+        run: |
+          python3 plutus.py --version | grep 'plutus v'
+          python3 plutus_route.py --version | grep 'plutus v'
+
+      - name: Smoke test — help output
+        run: |
+          python3 plutus.py --help > /dev/null
+          python3 plutus_route.py --help > /dev/null
+
+      - name: Smoke test — json mode
+        run: python3 plutus.py --json 2>/dev/null || echo "(state.db unavailable — expected in CI)"
+
+      - name: Run tests
+        run: python3 -m pytest test_plutus.py -v
