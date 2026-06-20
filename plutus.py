@@ -6,7 +6,7 @@ Named for the Greek god of wealth. Plutus watches the money flowing out of
 every LLM provider you use so you can balance usage across them efficiently.
 
 Two data sources, fused per provider:
-  1. LIVE BALANCE  — for providers that expose a balance API (DeepSeek today).
+  1. LIVE BALANCE  — for providers that expose a balance API (DeepSeek, OpenAI).
   2. LOCAL LEDGER  — per-session cost rows Hermes writes to state.db
                      (billing_provider + estimated/actual_cost_usd + tokens).
                      Used for spend, burn-rate, and remaining-budget math on
@@ -19,8 +19,8 @@ budgets file (plutus.budgets.json) for providers without a balance API, so
 Plutus can show "remaining = budget - ledger_spend".
 """
 from __future__ import annotations
-import argparse, json, os, sqlite3, sys, time, urllib.request, urllib.error
-from datetime import datetime, timezone
+import argparse, json, os, sqlite3, subprocess, sys, time, urllib.request, urllib.error
+from datetime import datetime, timezone, timedelta
 
 # ------------------------------------------------------------------ paths ---
 HERMES_CONFIG = os.environ.get(
@@ -38,7 +38,7 @@ DAY = 86400
 # The only providers you care about. Plutus reports exactly these, in this order.
 # Override with PLUTUS_PROVIDERS="deepseek,anthropic,google" (comma-separated).
 FOCUS_PROVIDERS = [p.strip() for p in os.environ.get(
-    "PLUTUS_PROVIDERS", "deepseek,anthropic,google").split(",") if p.strip()]
+    "PLUTUS_PROVIDERS", "deepseek,anthropic,google,openai").split(",") if p.strip()]
 
 # ------------------------------------------------------------- config load ---
 def load_yaml(path):
@@ -83,15 +83,42 @@ def deepseek_balance(api_key):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+def openai_balance(api_key):
+    """OpenAI balance via billing subscription endpoint.
+    Returns hard_limit_usd - total_usage as balance_usd.
+    Gracefully falls back on 404/403."""
+    try:
+        data = _get("https://api.openai.com/v1/dashboard/billing/subscription",
+                    {"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+        if data.get("object") == "error":
+            return {"ok": False, "error": data.get("message")}
+        total_granted = data.get("hard_limit_usd", 0)
+        total_used = data.get("total_usage", 0)
+        return {
+            "balance_usd": round(total_granted - total_used, 4),
+            "granted_usd": total_granted,
+            "topped_up_usd": None,
+            "available": True,
+            "ok": True,
+        }
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return {"ok": False, "error": f"OpenAI API returned {e.code} (no billing details or invalid key)"}
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 # provider name in config -> (balance fetcher, ledger billing_provider aliases)
 BALANCE_FETCHERS = {
     "deepseek": deepseek_balance,
+    "openai":   openai_balance,
 }
 # map config provider name -> the billing_provider strings seen in state.db
 LEDGER_ALIASES = {
-    "deepseek": ["deepseek"],
+    "deepseek":  ["deepseek"],
     "anthropic": ["anthropic"],
     "google":    ["google", "gemini"],
+    "openai":    ["openai"],
 }
 
 # ----------------------------------------------------------- local ledger ---
@@ -215,7 +242,7 @@ def render_cli(data, color=True):
     lines = []
     gen = datetime.fromtimestamp(data["generated_at"]).strftime("%Y-%m-%d %H:%M:%S")
     lines.append(c("  ____  _       _", "33"))
-    lines.append(c(" |  _ \\| |_   _| |_ _   _ ___", "33"))
+    lines.append(c(" |  _ \\| |_   _| |_ _   _ __", "33"))
     lines.append(c(" | |_) | | | | | __| | | / __|   god of wealth", "33"))
     lines.append(c(" |  __/| | |_| | |_| |_| \\__ \\   provider credit monitor", "33"))
     lines.append(c(" |_|   |_|\\__,_|\\__|\\__,_|___/", "33"))
@@ -341,7 +368,7 @@ def calibrate(pairs):
             sys.stderr.write(f"plutus: bad --calibrate '{pair}', want provider=balance\n")
             continue
         prov, val = pair.split("=", 1)
-        prov = prov.strip(); 
+        prov = prov.strip();
         try:
             bal = float(val)
         except ValueError:
@@ -364,10 +391,157 @@ def calibrate(pairs):
     for prov, bal, spent, budget in out:
         print(f"calibrated {prov}: reported balance ${bal:.2f} "
               f"(+ ${spent:.2f} spent = budget ${budget:.2f})")
+    # Issue #9: Show copy-paste command with current budget values
+    if out:
+        print("\nRe-run with: python3 plutus.py --calibrate " +
+              " ".join(f"{p[0]}={budgets.get(p[0], {}).get('budget_usd', 'NN.NN')}"
+                       for p in out))
     return out
 
+# --------------------------------------------------------------- forecast ---
+def do_forecast(provider_name, as_json):
+    """Forecast budget exhaustion using 7-day and 30-day average spend rates."""
+    data = collect()
+    forecasts = []
+    for e in data["providers"]:
+        if provider_name and e["provider"] != provider_name:
+            continue
+        burn_7d = e["spend"].get("7d", 0) / 7.0
+        burn_30d = e["spend"].get("30d", 0) / 30.0
+        balance = e["balance"] if e["balance"] is not None else e["remaining"]
+
+        if balance is not None and balance > 0 and burn_7d > 0:
+            days_7d = balance / burn_7d
+            exhaust_date_7d = datetime.now() + timedelta(days=days_7d)
+            forecasts.append({
+                "provider": e["provider"],
+                "burn_rate_avg": "7d",
+                "burn_per_day": round(burn_7d, 4),
+                "remaining_usd": round(balance, 4),
+                "exhaustion_date": exhaust_date_7d.strftime("%Y-%m-%d"),
+            })
+            # Only show 30d if burn rate differs meaningfully
+            if burn_30d > 0 and abs(burn_7d - burn_30d) > 0.001:
+                days_30d = balance / burn_30d
+                exhaust_date_30d = datetime.now() + timedelta(days=days_30d)
+                forecasts.append({
+                    "provider": e["provider"],
+                    "burn_rate_avg": "30d",
+                    "burn_per_day": round(burn_30d, 4),
+                    "remaining_usd": round(balance, 4),
+                    "exhaustion_date": exhaust_date_30d.strftime("%Y-%m-%d"),
+                })
+        elif balance is not None and balance <= 0:
+            forecasts.append({
+                "provider": e["provider"],
+                "message": "Balance exhausted or non-positive."
+            })
+        else:
+            forecasts.append({
+                "provider": e["provider"],
+                "message": "No balance or burn rate data available."
+            })
+
+    if as_json:
+        print(json.dumps(forecasts, indent=2))
+    else:
+        lines = []
+        lines.append("\nPlutus Forecast:")
+        lines.append("-" * 65)
+        hdr = f"{'PROVIDER':<12} {'AVG':<5} {'$/DAY':>9} {'REMAIN':>10} {'EXHAUSTS':>12}"
+        lines.append(hdr)
+        lines.append("-" * len(hdr))
+        for f in forecasts:
+            if "message" in f:
+                lines.append(f"{f['provider']:<12} {f['message']}")
+            else:
+                lines.append(f"{f['provider']:<12} {f['burn_rate_avg']:<5} "
+                             f"{fmt_usd(f['burn_per_day']):>9} "
+                             f"{fmt_usd(f['remaining_usd']):>10} "
+                             f"{f['exhaustion_date']:>12}")
+        lines.append("")
+        print("\n".join(lines))
+
+# ----------------------------------------------------------------- tokens ---
+def do_tokens(text):
+    """Count tokens using tiktoken if available, else word-based estimate."""
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        tokens = len(enc.encode(text))
+        print(f"Tokens (tiktoken): {tokens}")
+    except ImportError:
+        tokens = len(text.split())
+        print(f"tiktoken not available, falling back to word count.")
+        print(f"Tokens (word count estimate): {tokens}")
+
+# ------------------------------------------------------------------ alert ---
+def do_alert(dry_run):
+    """Send low-balance email alert via Himalaya CLI."""
+    budgets = load_budgets()
+    data = collect()
+
+    alerts_cfg = budgets.get("alerts", {}).get("email", {})
+    to_email = alerts_cfg.get("to")
+    balance_threshold_usd = alerts_cfg.get("balance_threshold_usd")
+    days_left_threshold = alerts_cfg.get("days_left_threshold")
+
+    if not to_email:
+        print("No email recipient configured. Add 'alerts.email.to' in plutus.budgets.json.")
+        return
+
+    alert_messages = []
+    for e in data["providers"]:
+        provider_name = e["provider"]
+        balance = e["balance"] if e["balance"] is not None else e["remaining"]
+        days_left = e["days_left"]
+
+        if balance_threshold_usd is not None and balance is not None and balance < balance_threshold_usd:
+            alert_messages.append(
+                f"  - {provider_name}: Balance ${balance:.2f} is below threshold ${balance_threshold_usd:.2f}")
+        if days_left_threshold is not None and days_left is not None and days_left < days_left_threshold:
+            alert_messages.append(
+                f"  - {provider_name}: {days_left:.1f} days left is below threshold {days_left_threshold:.1f} days")
+
+    if not alert_messages:
+        print("No low balance conditions detected. No alert sent.")
+        return
+
+    subject = "Plutus Low Balance Alert"
+    body = ("Plutus detected the following low balance conditions:\n\n" +
+            "\n".join(alert_messages) +
+            "\n\nCheck `plutus` for full details.\n")
+
+    if dry_run:
+        print("--- DRY RUN: Email Alert ---")
+        print(f"To: {to_email}")
+        print(f"Subject: {subject}")
+        print("Body:")
+        print(body)
+        print("----------------------------")
+        return
+
+    try:
+        cmd = ["himalaya", "send", "-t", to_email, "-s", subject, "-"]
+        proc = subprocess.run(cmd, input=body.encode("utf-8"),
+                              capture_output=True, timeout=30)
+        if proc.returncode == 0:
+            print(f"Email alert sent to {to_email}.")
+        else:
+            print(f"Himalaya exited with code {proc.returncode}.")
+            if proc.stdout:
+                print("stdout:", proc.stdout.decode().strip())
+            if proc.stderr:
+                print("stderr:", proc.stderr.decode().strip())
+    except FileNotFoundError:
+        print("Error: 'himalaya' command not found. Install Himalaya CLI for email alerts.")
+    except subprocess.TimeoutExpired:
+        print("Error: Himalaya timed out after 30 seconds.")
+    except Exception as e:
+        print(f"Error sending email alert: {e}")
+
 # ----------------------------------------------------------------- main ----
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 def main():
     ap = argparse.ArgumentParser(description="Plutus — provider credit & spend monitor")
@@ -379,8 +553,36 @@ def main():
                     help="set a provider's true balance, e.g. --calibrate anthropic=74.46 "
                          "(repeatable). Back-solves budget from current ledger spend.")
     ap.add_argument("--no-color", action="store_true")
+
+    subparsers = ap.add_subparsers(dest="command")
+
+    # forecast subcommand
+    forecast_ap = subparsers.add_parser("forecast", help="forecast budget exhaustion")
+    forecast_ap.add_argument("--json", action="store_true", help="emit raw JSON")
+    forecast_ap.add_argument("provider", nargs="?", help="forecast for a specific provider")
+
+    # tokens subcommand
+    tokens_ap = subparsers.add_parser("tokens", help="count tokens in text")
+    tokens_ap.add_argument("text", help="text to count tokens for")
+
+    # alert subcommand
+    alert_ap = subparsers.add_parser("alert", help="send low-balance alerts via email")
+    alert_ap.add_argument("--dry-run", action="store_true", help="print email instead of sending")
+
     args = ap.parse_args()
 
+    # Dispatch subcommands
+    if args.command == "forecast":
+        do_forecast(args.provider, args.json)
+        return
+    elif args.command == "tokens":
+        do_tokens(args.text)
+        return
+    elif args.command == "alert":
+        do_alert(args.dry_run)
+        return
+
+    # Legacy --calibrate flag
     if args.calibrate:
         calibrate(args.calibrate)
         # refresh dashboard after recalibration
@@ -391,6 +593,7 @@ def main():
         print(render_cli(data, color=not args.no_color))
         return
 
+    # Default: show main table
     data = collect()
     if args.snapshot:
         snapshot(data)
