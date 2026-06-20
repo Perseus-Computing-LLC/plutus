@@ -37,8 +37,25 @@ DAY = 86400
 
 # The only providers you care about. Plutus reports exactly these, in this order.
 # Override with PLUTUS_PROVIDERS="deepseek,anthropic,google" (comma-separated).
+# Also discovers providers from plutus.budgets.json → providers section.
+_FOCUS_DEFAULTS = "deepseek,anthropic,google,openai"
 FOCUS_PROVIDERS = [p.strip() for p in os.environ.get(
-    "PLUTUS_PROVIDERS", "deepseek,anthropic,google,openai").split(",") if p.strip()]
+    "PLUTUS_PROVIDERS", _FOCUS_DEFAULTS).split(",") if p.strip()]
+
+def _discover_budgets_providers():
+    """Discover additional providers from plutus.budgets.json → providers dict.
+    Returns list of provider names from the budgets file's providers section."""
+    budgets = load_budgets()
+    return list(budgets.get("providers", {}).keys())
+
+def _resolve_providers():
+    """Merge env-specified and budgets-discovered providers. Deduplicate."""
+    from_budgets = _discover_budgets_providers()
+    merged = list(FOCUS_PROVIDERS)
+    for p in from_budgets:
+        if p not in merged:
+            merged.append(p)
+    return merged
 
 # ------------------------------------------------------------- config load ---
 def load_yaml(path):
@@ -127,6 +144,25 @@ BALANCE_FETCHERS = {
     "anthropic": anthropic_balance,
     "google":    google_balance,
 }
+
+def _generic_balance(api_key, endpoint):
+    """Generic balance fetcher for custom providers with OpenAI-compatible endpoints.
+    Tries GET {endpoint}/user/balance or {endpoint}/billing/credits if available."""
+    try:
+        # Try common balance endpoint patterns
+        for path in ["/user/balance", "/billing/credits", "/v1/credits"]:
+            try:
+                data = _get(f"{endpoint.rstrip('/')}{path}",
+                    {"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+                if isinstance(data, dict):
+                    balance = data.get("total_balance") or data.get("balance_usd") or data.get("credits")
+                    if balance is not None:
+                        return {"balance_usd": float(balance), "ok": True, "source": "live"}
+            except Exception:
+                continue
+        return {"ok": False, "source": "estimate", "note": "Custom provider — no live balance endpoint found"}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "source": "estimate"}
 # map config provider name -> the billing_provider strings seen in state.db
 LEDGER_ALIASES = {
     "deepseek":  ["deepseek"],
@@ -180,10 +216,10 @@ def collect():
     ledger, ledger_err = ledger_spend(STATE_DB)
 
     # union of configured providers and providers seen in the ledger
-    names = [p for p in FOCUS_PROVIDERS if p in providers]
+    names = [p for p in _resolve_providers() if p in providers]
     # if a focus provider isn't in config, still report it (ledger-only) so
-    # the user always sees all three they asked for
-    for p in FOCUS_PROVIDERS:
+    # the user always sees all they asked for
+    for p in _resolve_providers():
         if p not in names:
             names.append(p)
     # fold ledger aliases back to canonical config names where possible
@@ -214,6 +250,13 @@ def collect():
         }
         # live balance?
         fetcher = BALANCE_FETCHERS.get(name)
+        if not fetcher:
+            # Check if custom provider is defined in budgets.json
+            provider_cfg = budgets.get("providers", {}).get(name)
+            if provider_cfg and provider_cfg.get("endpoint"):
+                api_key = providers.get(name, {}).get("api_key")
+                endpoint = provider_cfg["endpoint"]
+                fetcher = lambda ak=api_key, ep=endpoint: _generic_balance(ak, ep)
         if fetcher and providers.get(name, {}).get("api_key"):
             bal = fetcher(providers[name]["api_key"])
             entry["source"] = bal.get("source", "estimate")
