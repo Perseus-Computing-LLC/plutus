@@ -321,6 +321,11 @@ def render_html(data):
 <td class="num">{fmt_usd(s.get('30d'))}</td><td class="num">{fmt_usd(s.get('all'))}</td>
 <td class="num">{fmt_usd(e.get('burn_per_day'))}</td><td class="num">{days_s}</td></tr>""")
     note = f'<p class="note">{data["ledger_error"]}</p>' if data.get("ledger_error") else ""
+    
+    # Build trends section from snapshot history
+    snapshot_history = _load_snapshot_history()
+    trends_html = render_trends_html(data, snapshot_history)
+    
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Plutus — provider credit monitor</title>
@@ -345,6 +350,7 @@ tr.warn .num{{color:var(--red)}}
 tfoot td{{font-weight:700;background:#11141c;border-bottom:none}}
 .note{{color:var(--gold);font-size:13px}}
 .legend{{color:var(--dim);font-size:12px;margin-top:16px}}
+{_TRENDS_CSS}
 </style></head><body><div class="wrap">
 <h1>Plutus <span>god of wealth · provider credit monitor</span></h1>
 <p class="sub">generated {gen}</p>
@@ -356,6 +362,7 @@ tfoot td{{font-weight:700;background:#11141c;border-bottom:none}}
 <td class="num">{fmt_usd(tot['today'])}</td><td class="num">{fmt_usd(tot['7d'])}</td>
 <td class="num">{fmt_usd(tot['30d'])}</td><td class="num">{fmt_usd(tot['all'])}</td><td></td><td></td></tr></tfoot></table>
 {note}
+{trends_html}
 <p class="legend"><b>LIVE</b> = real balance pulled from the provider API · <b>EST</b> = estimate (budget − spend, no live API) · <b>$/day</b> = trailing 7-day burn · <b>Days left</b> = balance ÷ burn.</p>
 </div></body></html>"""
 
@@ -371,6 +378,134 @@ def snapshot(data):
     with open(SNAPSHOT_FILE, "a", encoding='utf-8') as f:
         f.write(json.dumps(rec) + "\n")
     return SNAPSHOT_FILE
+
+# --------------------------------------------------------------- trends ---
+def _load_snapshot_history():
+    """Load snapshot lines into a list of {provider: {bal, rem, all}, t} dicts."""
+    if not os.path.exists(SNAPSHOT_FILE):
+        return []
+    out = []
+    with open(SNAPSHOT_FILE, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+def _linear_regression(points):
+    """Simple linear regression: returns (slope, intercept) or None."""
+    n = len(points)
+    if n < 3:
+        return None
+    sum_x = sum(p[0] for p in points)
+    sum_y = sum(p[1] for p in points)
+    sum_xy = sum(p[0] * p[1] for p in points)
+    sum_xx = sum(p[0] * p[0] for p in points)
+    denom = n * sum_xx - sum_x * sum_x
+    if abs(denom) < 0.0001:
+        return None
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    return (slope, intercept)
+
+def _render_sparkline(points, width=120, height=30, color="#e9c46a"):
+    """Render an inline SVG sparkline from data points [(x, y), ...]."""
+    if len(points) < 2:
+        return ""
+    ys = [p[1] for p in points]
+    y_min = min(ys); y_max = max(ys)
+    if y_max - y_min < 0.01:
+        y_min -= 1; y_max += 1
+    x_min = points[0][0]; x_max = points[-1][0]
+    if x_max - x_min < 1:
+        x_max = x_min + 1
+    
+    def px(x, y):
+        return f"{(x - x_min)/(x_max - x_min) * width:.1f},{(1 - (y - y_min)/(y_max - y_min)) * height:.1f}"
+    
+    path = " ".join(f"{'L' if i>0 else 'M'}{px(p[0], p[1])}" for i, p in enumerate(points))
+    y_label = f"${y_max:.1f}"
+    return f'<svg width="{width}" height="{height}" style="vertical-align:middle;margin:0 4px">' \
+           f'<polyline fill="none" stroke="{color}" stroke-width="1.5" points="{path}"/>' \
+           f'<text x="0" y="8" fill="#8b93a7" font-size="8">{y_label}</text></svg>'
+
+def render_trends_html(data, snapshot_history):
+    """Build burn-rate trend section as an HTML block with SVG sparklines."""
+    if not snapshot_history:
+        return ""
+    
+    now = time.time()
+    providers = {e["provider"]: e for e in data["providers"]}
+    
+    rows = []
+    for pname, pinfo in providers.items():
+        # Extract all-time spend over time for this provider
+        points = []
+        for snap in snapshot_history:
+            t = snap.get("t", 0)
+            provider_data = snap.get(pname)
+            if provider_data:
+                all_spend = provider_data.get("all", 0)
+                if all_spend > 0 or len(points) > 0:
+                    points.append((t, all_spend))
+        
+        if len(points) < 3:
+            continue
+        
+        # Linear regression on spend over time
+        points_relative = [(p[0] - points[0][0], p[1]) for p in points]
+        trend = _linear_regression(points_relative)
+        if trend is None:
+            continue
+        
+        slope, intercept = trend
+        # Make relative points for sparkline (seconds -> hours)
+        spark_points = [(p[0] / 3600.0, p[1]) for p in points_relative]
+        
+        # Forecast: project forward 30 days
+        spend_now = points_relative[-1][1]
+        spend_7d = intercept + slope * 7 * DAY
+        spend_30d = intercept + slope * 30 * DAY
+        
+        daily_burn = max(slope, 0) * DAY
+        fore_7 = f"${spend_7d:.2f}" if daily_burn > 0 else "—"
+        fore_30 = f"${spend_30d:.2f}" if daily_burn > 0 else "—"
+        
+        spark = _render_sparkline(spark_points[-48:], width=100, height=24,
+                                  color="#2dd4a7" if pinfo["source"] == "live" else "#e9c46a")
+        
+        rows.append(f"""<tr>
+<td class="prov">{pname}</td>
+<td class="num">{fmt_usd(daily_burn) if daily_burn > 0 else '—'}</td>
+<td class="num">{fore_7}</td>
+<td class="num">{fore_30}</td>
+<td>{spark}</td></tr>""")
+    
+    if not rows:
+        return ""
+    
+    return f"""
+<div class="trends-section">
+<h2>Burn-Rate Trends <span>from snapshot history</span></h2>
+<table><thead><tr>
+<th>Provider</th><th class="num">Daily burn</th><th class="num">7d forecast</th><th class="num">30d forecast</th><th>Trend</th>
+</tr></thead><tbody>
+{''.join(rows)}
+</tbody></table>
+<p class="legend">Forecasts use linear regression from snapshot history. Sparklines show last 48 data points.</p>
+</div>
+"""
+
+# Additional CSS for trends section
+_TRENDS_CSS = """
+.trends-section{{margin-top:32px}}
+.trends-section h2{{font-size:18px;color:var(--gold);margin:0 0 12px}}
+.trends-section h2 span{{color:var(--dim);font-size:12px;font-weight:400;margin-left:8px}}
+"""
 
 # ------------------------------------------------------------- calibrate ---
 def calibrate(pairs):
