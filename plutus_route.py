@@ -195,6 +195,101 @@ def runway():
     return rw, data
 
 
+def backtest(policy_name, policy_config):
+    """Replay session history against a routing policy."""
+    import sqlite3
+    STATE_DB = os.environ.get("PLUTUS_STATE_DB",
+                               "/opt/data/webui/minions-hermes-config/state.db")
+    if not os.path.exists(STATE_DB):
+        print(f"State DB not found: {STATE_DB}")
+        return
+    
+    sessions = []
+    try:
+        c = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True)
+        cur = c.execute("""
+            select coalesce(nullif(billing_provider,''),'unknown') as prov,
+                   coalesce(model,'') as model,
+                   coalesce(nullif(actual_cost_usd,0), estimated_cost_usd, 0) as cost,
+                   started_at
+            from sessions
+            order by started_at
+        """)
+        for prov, model, cost, started in cur.fetchall():
+            if cost > 0 and started:
+                sessions.append({
+                    "provider": prov, "model": model,
+                    "cost": float(cost), "started": float(started or 0),
+                })
+        c.close()
+    except Exception as e:
+        print(f"Error reading state.db: {e}")
+        return
+    
+    if not sessions:
+        print("No session data available for backtest.")
+        return
+    
+    sessions.sort(key=lambda s: s["started"])
+    actual_cost = sum(s["cost"] for s in sessions)
+    
+    projected = 0
+    decisions_changed = 0
+    for s in sessions:
+        actual_model = s["model"]
+        actual_cost_s = s["cost"]
+        actual_cost_per_m = MODEL_COST_PER_1M_IN.get(actual_model)
+        if actual_cost_per_m is None:
+            projected += actual_cost_s
+            continue
+        
+        best_model = actual_model
+        best_cost = actual_cost_per_m
+        for prov in PROVIDERS:
+            for model in [FLAGSHIP.get(prov), SUBTASK.get(prov)]:
+                if not model:
+                    continue
+                cost_m = MODEL_COST_PER_1M_IN.get(model)
+                if cost_m is None:
+                    continue
+                passes = True
+                if "cost-cap" in policy_name:
+                    cap = policy_config.get("cost_max_per_1m", 5.0)
+                    if cost_m > cap:
+                        passes = False
+                if "quality-floor" in policy_name:
+                    floor = policy_config.get("quality_min_score", 70)
+                    if MODEL_QUALITY_SCORE.get(model, 0) < floor:
+                        passes = False
+                if passes and cost_m < best_cost:
+                    best_model = model
+                    best_cost = cost_m
+        
+        if best_model != actual_model:
+            decisions_changed += 1
+        if actual_cost_per_m > 0:
+            projected += actual_cost_s * (best_cost / actual_cost_per_m)
+        else:
+            projected += actual_cost_s
+    
+    delta = actual_cost - projected
+    n = len(sessions)
+    first_ts = sessions[0]["started"]
+    last_ts = sessions[-1]["started"]
+    days = max((last_ts - first_ts) / 86400, 1)
+    
+    print(f"\nBacktest: policy='{policy_name}'")
+    print(f"  Sessions:    {n} over {days:.1f} days")
+    print(f"  Actual cost: ${actual_cost:.2f}")
+    print(f"  Projected:   ${projected:.2f}")
+    if delta > 0:
+        print(f"  Savings:     ${delta:.2f} ({delta/actual_cost*100:.1f}%)")
+    else:
+        print(f"  Delta:       ${delta:.2f} — policy would increase costs")
+    print(f"  Decisions changed: {decisions_changed}/{n}")
+    print(f"  Summary: Policy '{policy_name}' would have {'saved' if delta > 0 else 'cost an extra'} ${abs(delta):.2f} over {days:.0f} days.\n")
+
+
 def load_yaml(path):
     import yaml
     with open(path, encoding='utf-8') as f:
@@ -313,6 +408,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="preview routing without writing config")
     ap.add_argument("--apply", action="store_true", help="write routing to config.yaml")
     ap.add_argument("--policy", metavar="NAME", help="override routing policy (runway, cost-cap, latency-weighted, quality-floor, or comma-separated stack)")
+    ap.add_argument("--backtest", metavar="POLICY", help="replay session history against a policy and report savings")
     args = ap.parse_args()
     dry = args.dry_run
     rw, data = runway()
@@ -330,6 +426,10 @@ def main():
         pass
     
     pl = plan(rw, policy=policy_name, policy_config=policy_config)
+
+    if args.backtest:
+        backtest(args.backtest, policy_config)
+        return
 
     print("Runway (days left):")
     for prov in pl["order"]:
