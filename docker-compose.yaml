@@ -1,0 +1,30 @@
+# Plutus — self-hosted billing for AI agents.
+#   docker compose up            → dashboard at http://localhost:8420 (demo data)
+#   docker compose run plutus init   → set up a real org
+#
+# For real (non-demo) use, set `command: serve --host 0.0.0.0` and provide
+# Stripe keys via the environment (a .env file is read automatically).
+services:
+  plutus:
+    build: .
+    image: ghcr.io/perseus-computing-llc/plutus:latest
+    container_name: plutus
+    ports:
+      - "8420:8420"
+    volumes:
+      - plutus-data:/data
+    environment:
+      PLUTUS_HOME: /data
+      # --- Stripe (optional; leave blank to run fully offline) ---
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO:-}
+    # Demo by default so the stack shows value on first `up`. Swap to the real
+    # server once you've run `plutus init`:
+    # command: ["serve", "--host", "0.0.0.0"]
+    command: ["serve", "--demo", "--host", "0.0.0.0"]
+    restart: unless-stopped
+
+volumes:
+  plutus-data:

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plutus-agent"
+version = "0.2.0"
+description = "The billing layer for AI agents — self-hosted, Stripe-integrated usage metering and prepaid-credit billing for LLM/agent spend."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Thomas Connally", email = "tcconnally@gmail.com" }]
+maintainers = [{ name = "Perseus Computing LLC" }]
+keywords = [
+    "llm", "billing", "metering", "finops", "ai-agents", "stripe",
+    "usage-based-billing", "cost-tracking", "openai", "anthropic",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "PyYAML>=5.4",
+]
+
+[project.optional-dependencies]
+stripe = ["stripe>=7.0"]
+pdf = ["reportlab>=4.0"]
+all = ["stripe>=7.0", "reportlab>=4.0"]
+dev = ["stripe>=7.0", "reportlab>=4.0", "pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://perseus.observer/plutus/"
+Repository = "https://github.com/Perseus-Computing-LLC/plutus"
+Issues = "https://github.com/Perseus-Computing-LLC/plutus/issues"
+
+[project.scripts]
+plutus = "plutus_agent.cli:main"
+
+[tool.setuptools]
+# The repo also contains the production monitor (plutus.py / plutus_route.py) at
+# the root; those ship and run independently and are NOT part of this package.
+packages = [
+    "plutus_agent",
+    "plutus_agent.billing",
+    "plutus_agent.server",
+    "plutus_agent.integrations",
+]
+
+[tool.setuptools.package-data]
+plutus_agent = ["assets/*"]

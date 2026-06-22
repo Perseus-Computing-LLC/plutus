@@ -1,0 +1,16 @@
+.git
+__pycache__
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.html
+*.jsonl
+*.log
+.venv
+venv
+build
+dist
+*.egg-info
+tests
+demo.cast

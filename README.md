@@ -1,9 +1,15 @@
 # Plutus — LLM FinOps Tool
 
 [![Test](https://github.com/Perseus-Computing-LLC/plutus/actions/workflows/test.yml/badge.svg)](https://github.com/Perseus-Computing-LLC/plutus/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/plutus-agent.svg)](https://pypi.org/project/plutus-agent/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > Named for the Greek god of wealth. Plutus is a standalone provider credit monitor and cost-aware model router for multi-provider LLM stacks.
 
+```bash
+pip install plutus-agent          # PyPI; stdlib + PyYAML, Stripe optional
+plutus demo                       # zero-setup tour with a month of sample data
+#   → open http://localhost:8420
 ```
   ____  _       _
  |  _ \| |_   _| |_ _   _ ___
@@ -60,11 +66,31 @@ plutus-route --apply
 plutus-route --backtest cost-cap
 ```
 
-## How it works
+```bash
+plutus init --org "Acme Agents" --tier pro --workspace ci --budget 100
+plutus topup --amount 50          # add prepaid credit (Stripe does this in prod)
+plutus meter --provider anthropic --model claude-opus-4-8 \
+             --task code_review --workspace ci --input 8200 --output 2400
+plutus serve                      # your live dashboard at :8420
+```
+
+Or in your agent code:
+
+```python
+from plutus_agent import Meter
+
+plutus = Meter(org="Acme Agents")
+resp = client.messages.create(model="claude-opus-4-8", ...)
+plutus.track(provider="anthropic", model="claude-opus-4-8",
+             task_type="code_review", workspace="ci",
+             input_tokens=resp.usage.input_tokens,
+             output_tokens=resp.usage.output_tokens)
+print(plutus.balance())           # remaining prepaid credit
+```
 
 Plutus reads your session history from a SQLite state database (Hermes Agent `state.db` by default, configurable) and fuses it with live balance APIs:
 
-| Source | Used for |
+| | |
 |---|---|
 | **Live balance API** | DeepSeek, OpenAI — real-time dollar balances via REST |
 | **Spend ledger** | All providers — per-session cost rows (actual or estimated), token counts |
@@ -163,7 +189,7 @@ Run: `plutus alert` (or `plutus alert --dry-run` to preview).
 
 Plutus is the missing piece between LLM ops tools and cloud cost tools: LLM-specific FinOps.
 
-## Automation
+Provider price tables (used to *estimate* cost from tokens when an exact cost isn't supplied) are overridable under `pricing.overrides`.
 
 Designed to run on a schedule. Typical cron setup:
 
@@ -175,7 +201,7 @@ Designed to run on a schedule. Typical cron setup:
 0 9 */3 * * cd /path/to/plutus && plutus alert
 ```
 
-## Files
+## The credit monitor (`plutus.py`)
 
 | File | Purpose |
 |---|---|
@@ -187,4 +213,4 @@ Designed to run on a schedule. Typical cron setup:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). © Perseus Computing LLC.
