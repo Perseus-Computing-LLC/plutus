@@ -125,11 +125,26 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
-def load() -> dict:
-    """Load config, layering: defaults < file < environment overrides."""
-    cfg = _deep_merge(DEFAULT_CONFIG, _load_yaml(config_path()))
+def load_base() -> dict:
+    """Defaults merged with the on-disk config only — **no environment**.
 
-    # environment overrides (keys never logged)
+    This is what may be written back with :func:`save`. Env-provided secrets
+    (Stripe keys, SMTP password) are deliberately excluded so they never get
+    persisted to ``config.yaml`` in plaintext.
+    """
+    return _deep_merge(DEFAULT_CONFIG, _load_yaml(config_path()))
+
+
+def load() -> dict:
+    """Runtime config, layering: defaults < file < environment overrides.
+
+    Use for *reading* config at runtime. Do NOT pass the result to
+    :func:`save` — that would persist env-injected secrets. Use
+    :func:`load_base` as the basis for anything you intend to save.
+    """
+    cfg = load_base()
+
+    # environment overrides (keys never logged, never saved)
     env = os.environ
     if env.get("STRIPE_SECRET_KEY"):
         cfg["billing"]["stripe_secret_key"] = env["STRIPE_SECRET_KEY"]
@@ -149,9 +164,31 @@ def load() -> dict:
     return cfg
 
 
+def _strip_env_secrets(cfg: dict) -> dict:
+    """Return a deep-ish copy with any secret that matches its env var blanked,
+    so secrets sourced from the environment are never written to disk."""
+    import copy
+    out = copy.deepcopy(cfg)
+    env = os.environ
+    pairs = [
+        ("billing", "stripe_secret_key", "STRIPE_SECRET_KEY"),
+        ("billing", "stripe_publishable_key", "STRIPE_PUBLISHABLE_KEY"),
+        ("billing", "stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
+        ("alerts", "smtp_password", "PLUTUS_SMTP_PASSWORD"),
+    ]
+    for section, key, envvar in pairs:
+        val = out.get(section, {}).get(key)
+        if val and env.get(envvar) and val == env[envvar]:
+            out[section][key] = ""
+    return out
+
+
 def save(cfg: dict) -> Path:
+    """Persist config to disk. Secrets that came from the environment are
+    stripped first (see :func:`_strip_env_secrets`) — ``config.yaml`` should
+    never hold a live key that was provided via env."""
     path = config_path()
-    _dump_yaml(path, cfg)
+    _dump_yaml(path, _strip_env_secrets(cfg))
     return path
 
 

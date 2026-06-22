@@ -228,6 +228,37 @@ class TestReports(unittest.TestCase):
             drop_conn(conn)
 
 
+class TestConfigSecretHandling(unittest.TestCase):
+    """Regression: env-provided secrets must never be written to config.yaml."""
+
+    def setUp(self):
+        import tempfile
+        self.home = tempfile.mkdtemp()
+        os.environ["PLUTUS_HOME"] = self.home
+
+    def tearDown(self):
+        os.environ.pop("PLUTUS_HOME", None)
+        os.environ.pop("STRIPE_SECRET_KEY", None)
+
+    def test_save_strips_env_secret(self):
+        from plutus_agent import config as cfgmod
+        os.environ["STRIPE_SECRET_KEY"] = "sk_live_should_not_persist"
+        cfg = cfgmod.load()  # env-merged — contains the key in memory
+        self.assertEqual(cfg["billing"]["stripe_secret_key"], "sk_live_should_not_persist")
+        cfg["billing"]["stripe_price_pro"] = "price_123"
+        cfgmod.save(cfg)  # must strip the env secret
+        import yaml
+        on_disk = yaml.safe_load(open(cfgmod.config_path(), encoding="utf-8"))
+        self.assertEqual(on_disk["billing"]["stripe_secret_key"], "")
+        self.assertEqual(on_disk["billing"]["stripe_price_pro"], "price_123")
+
+    def test_load_base_has_no_env(self):
+        from plutus_agent import config as cfgmod
+        os.environ["STRIPE_SECRET_KEY"] = "sk_live_env_only"
+        self.assertEqual(cfgmod.load_base()["billing"]["stripe_secret_key"], "")
+        self.assertEqual(cfgmod.load()["billing"]["stripe_secret_key"], "sk_live_env_only")
+
+
 class TestClaudeHook(unittest.TestCase):
     def test_merge_is_idempotent(self):
         from plutus_agent import cli

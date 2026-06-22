@@ -313,9 +313,12 @@ def cmd_stripe_setup(args):
         )
         _ok(f"created Pro product {product.id} + price {price.id} ($20/mo)")
 
-    cfg["billing"]["stripe_price_pro"] = price.id
-    saved = cfgmod.save(cfg)
-    _ok(f"wrote stripe_price_pro to {saved}")
+    # Save onto the file-only config (never the env-merged one) so the live
+    # key provided via STRIPE_SECRET_KEY is not persisted to disk.
+    to_save = cfgmod.load_base()
+    to_save["billing"]["stripe_price_pro"] = price.id
+    saved = cfgmod.save(to_save)
+    _ok(f"wrote stripe_price_pro to {saved} (key NOT persisted — keep it in env)")
     print("\n  Next:")
     print("    1. plutus serve                       # dashboard with Checkout enabled")
     print("    2. stripe listen --forward-to localhost:8420/webhook/stripe")
