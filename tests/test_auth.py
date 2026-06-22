@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Auth: sessions, allow-listing, OIDC callback, and live server enforcement."""
+import base64
+import copy
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from plutus_agent import config as cfgmod, db, demo
+from plutus_agent.config import DEFAULT_CONFIG
+from plutus_agent.server import app, auth as authmod
+
+
+def _auth_cfg(**over):
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    cfg["auth"].update({
+        "enabled": True,
+        "google_client_id": "cid.apps.googleusercontent.com",
+        "google_client_secret": "secret",
+        "base_url": "http://127.0.0.1",
+    })
+    cfg["auth"].update(over)
+    return cfg
+
+
+def _jwt(claims: dict) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"hdr.{payload}.sig"
+
+
+class TestSessionsAndAllowlist(unittest.TestCase):
+    def setUp(self):
+        fd, self.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.conn = db.connect(self.dbpath)
+        db.init_schema(self.conn)
+        self.org = db.create_org(self.conn, "Acme", owner_email="owner@example.com")
+        self.user = db.users_by_email(self.conn, "owner@example.com")[0]
+
+    def tearDown(self):
+        self.conn.close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.dbpath + ext)
+            except OSError:
+                pass
+
+    def test_session_lifecycle(self):
+        tok = db.create_session(self.conn, self.user["id"], ttl_seconds=60)
+        self.assertEqual(db.session_user(self.conn, tok)["email"], "owner@example.com")
+        db.delete_session(self.conn, tok)
+        self.assertIsNone(db.session_user(self.conn, tok))
+
+    def test_expired_session_rejected(self):
+        tok = db.create_session(self.conn, self.user["id"], ttl_seconds=-1)
+        self.assertIsNone(db.session_user(self.conn, tok))
+        self.assertEqual(db.purge_expired_sessions(self.conn), 1)
+
+    def test_member_authorized(self):
+        uid = authmod._authorize_email(self.conn, _auth_cfg(), "owner@example.com")
+        self.assertEqual(uid, self.user["id"])
+
+    def test_email_case_insensitive(self):
+        uid = authmod._authorize_email(self.conn, _auth_cfg(), "OWNER@Example.com")
+        self.assertEqual(uid, self.user["id"])
+
+    def test_stranger_denied(self):
+        self.assertIsNone(
+            authmod._authorize_email(self.conn, _auth_cfg(), "nobody@example.com"))
+
+    def test_allowed_email_provisioned(self):
+        cfg = _auth_cfg(allowed_emails=["new@example.com"],
+                        provision_org_id=self.org["id"])
+        uid = authmod._authorize_email(self.conn, cfg, "new@example.com", name="New")
+        self.assertIsNotNone(uid)
+        self.assertTrue(db.email_in_org(self.conn, "new@example.com", self.org["id"]))
+
+    def test_allowed_domain_provisioned_into_sole_org(self):
+        cfg = _auth_cfg(allowed_domain="example.com")  # sole org → auto target
+        uid = authmod._authorize_email(self.conn, cfg, "dept@example.com")
+        self.assertIsNotNone(uid)
+
+    def test_orgs_scoped_to_membership(self):
+        other = db.create_org(self.conn, "Other", owner_email="them@other.com")
+        mine = db.list_orgs_for_email(self.conn, "owner@example.com")
+        self.assertEqual([o["id"] for o in mine], [self.org["id"]])
+        self.assertFalse(db.email_in_org(self.conn, "owner@example.com", other["id"]))
+
+
+class TestOIDCCallback(unittest.TestCase):
+    def setUp(self):
+        fd, self.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.conn = db.connect(self.dbpath)
+        db.init_schema(self.conn)
+        db.create_org(self.conn, "Acme", owner_email="owner@example.com")
+        self.cfg = _auth_cfg()
+
+    def tearDown(self):
+        self.conn.close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.dbpath + ext)
+            except OSError:
+                pass
+
+    def _good_claims(self, nonce, **over):
+        c = {"aud": self.cfg["auth"]["google_client_id"],
+             "iss": "https://accounts.google.com",
+             "exp": time.time() + 3600, "nonce": nonce,
+             "email": "owner@example.com", "email_verified": True, "name": "Owner"}
+        c.update(over)
+        return c
+
+    def test_claims_validation_rejects_bad_token(self):
+        nonce = "n1"
+        bad = [
+            self._good_claims(nonce, aud="someone-else"),
+            self._good_claims(nonce, iss="https://evil.example"),
+            self._good_claims(nonce, exp=time.time() - 1),
+            self._good_claims("other-nonce"),
+            self._good_claims(nonce, email_verified=False),
+        ]
+        for claims in bad:
+            with self.assertRaises(authmod.AuthError):
+                authmod._claims_from_id_token(_jwt(claims), self.cfg, nonce)
+
+    def test_callback_creates_session(self):
+        url = authmod.login_url(self.cfg)
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        state, nonce = qs["state"][0], qs["nonce"][0]
+
+        orig = authmod._exchange_code
+        authmod._exchange_code = lambda cfg, code: {"id_token": _jwt(self._good_claims(nonce))}
+        try:
+            token = authmod.handle_callback(
+                self.conn, self.cfg, {"code": "abc", "state": state})
+        finally:
+            authmod._exchange_code = orig
+
+        self.assertEqual(db.session_user(self.conn, token)["email"], "owner@example.com")
+
+    def test_callback_rejects_unknown_state(self):
+        with self.assertRaises(authmod.AuthError):
+            authmod.handle_callback(self.conn, self.cfg,
+                                    {"code": "abc", "state": "never-issued"})
+
+
+class TestServerEnforcement(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = db.connect(cls.dbpath)
+        cls.org_id = demo.seed(conn, events=40)
+        cls.user = db.ensure_user(conn, cls.org_id, "owner@example.com",
+                                  name="Owner", role="owner")
+        cls.other_org = db.create_org(conn, "Outsider", owner_email="x@x.com")["id"]
+        cls.token = db.create_session(conn, cls.user["id"], ttl_seconds=3600)
+        conn.close()
+
+        ctx = app._Ctx(_auth_cfg(), cls.dbpath, demo=True)
+        assert ctx.auth_on, "auth should be enabled for this test"
+        cls.httpd = app._Server(("127.0.0.1", 0), app.Handler, ctx)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(cls.dbpath + ext)
+            except OSError:
+                pass
+
+    def _req(self, path, cookie=None):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        headers = {"Cookie": f"plutus_session={cookie}"} if cookie else {}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read().decode()
+
+    def test_healthz_public(self):
+        status, _ = self._req("/healthz")
+        self.assertEqual(status, 200)
+
+    def test_unauthenticated_lands_on_login(self):
+        # GET / → 303 to /auth/login (followed) → login page, NOT the dashboard
+        status, body = self._req("/")
+        self.assertEqual(status, 200)
+        self.assertIn("Sign in with Google", body)
+        self.assertNotIn("Credit balance", body)
+
+    def test_api_requires_auth(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self._req("/api/summary")
+        self.assertEqual(cm.exception.code, 401)
+
+    def test_authenticated_dashboard(self):
+        status, body = self._req("/", cookie=self.token)
+        self.assertEqual(status, 200)
+        self.assertIn("Credit balance", body)
+        self.assertIn("Sign out", body)
+
+    def test_cross_org_forbidden(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self._req(f"/api/summary?org={self.other_org}", cookie=self.token)
+        self.assertEqual(cm.exception.code, 403)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -6,6 +6,7 @@ connection per request (SQLite connections aren't thread-safe to share).
 """
 from __future__ import annotations
 
+import html
 import json
 import sys
 import time
@@ -14,7 +15,11 @@ from urllib.parse import urlparse, parse_qs
 
 from .. import __version__, bridge, config as cfgmod, db
 from ..billing import StripeClient, BillingError, handle_webhook_event
-from . import api, views
+from . import api, views, auth as authmod
+
+# Paths reachable without a session when auth is enabled.
+_PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe",
+                 "/auth/login", "/auth/callback", "/auth/logout"}
 
 
 class _Ctx:
@@ -24,6 +29,7 @@ class _Ctx:
         self.db_path = db_path
         self.demo = demo
         self.stripe = StripeClient(cfg)
+        self.auth_on = cfgmod.auth_enabled(cfg)
         self._runway = None
         self._runway_ts = 0
 
@@ -88,6 +94,76 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter, single-line
         sys.stderr.write("plutus %s — %s\n" % (self.address_string(), fmt % args))
 
+    # ---- auth --------------------------------------------------------------
+    def _gate(self, conn, path) -> bool:
+        """When auth is on, require a session for non-public paths.
+
+        Sets ``self._user`` (row or None). Returns True if the request may
+        proceed, False if a 401/redirect was already sent.
+        """
+        self._user = None
+        if not self.ctx.auth_on:
+            return True
+        self._user = authmod.current_user(self, conn)
+        if self._user or path in _PUBLIC_PATHS:
+            return True
+        # not signed in, protected path
+        if path.startswith("/api/") or self.command == "POST":
+            self._json(401, {"error": "authentication required"})
+        else:
+            self._redirect("/auth/login")
+        return False
+
+    def _scoped_orgs(self, conn):
+        """Orgs visible to this request (all when auth is off)."""
+        if self._user is not None:
+            return db.list_orgs_for_email(conn, self._user["email"])
+        return db.list_orgs(conn)
+
+    def _authz_org(self, conn, requested):
+        """Resolve the org for this request, enforcing membership when signed in.
+
+        Returns an org_id, or None meaning "no org available". Raises
+        :class:`PermissionError` if a signed-in user asks for an org they are
+        not a member of.
+        """
+        if self._user is None:
+            return requested or api.default_org_id(conn)
+        orgs = db.list_orgs_for_email(conn, self._user["email"])
+        ids = {o["id"] for o in orgs}
+        if requested:
+            if requested not in ids:
+                raise PermissionError(requested)
+            return requested
+        return orgs[0]["id"] if orgs else None
+
+    def _auth_login(self):
+        try:
+            url = authmod.login_url(self.ctx.cfg)
+        except authmod.AuthError as e:
+            return self._send(500, views.simple_page(
+                "Sign in", "Sign-in is misconfigured", html.escape(str(e)), ok=False))
+        return self._send(200, views.login_page(url))
+
+    def _auth_callback(self, conn, q):
+        flat = {k: (v[0] if isinstance(v, list) else v) for k, v in q.items()}
+        try:
+            token = authmod.handle_callback(conn, self.ctx.cfg, flat)
+        except authmod.AuthError as e:
+            return self._send(403, views.simple_page(
+                "Sign in", "Could not sign you in", html.escape(str(e)), ok=False))
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", authmod.set_cookie_header(token, self.ctx.cfg))
+        self.end_headers()
+
+    def _auth_logout(self, conn):
+        db.delete_session(conn, authmod.read_cookie(self))
+        self.send_response(303)
+        self.send_header("Location", "/auth/login")
+        self.send_header("Set-Cookie", authmod.clear_cookie_header(self.ctx.cfg))
+        self.end_headers()
+
     # ---- routing -----------------------------------------------------------
     def do_HEAD(self):
         self.do_GET()
@@ -97,15 +173,23 @@ class Handler(BaseHTTPRequestHandler):
         path, q = u.path, parse_qs(u.query)
         conn = self._conn()
         try:
+            if not self._gate(conn, path):
+                return
             if path == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
             if path == "/healthz":
                 return self._json(200, {"ok": True, "version": __version__,
                                         "demo": self.ctx.demo})
+            if path == "/auth/login":
+                return self._auth_login()
+            if path == "/auth/callback":
+                return self._auth_callback(conn, q)
+            if path == "/auth/logout":
+                return self._auth_logout(conn)
             if path == "/api/orgs":
-                return self._json(200, api.orgs_json(conn))
+                return self._json(200, api.orgs_json(conn, self._scoped_orgs(conn)))
             if path == "/api/summary":
-                org_id = (q.get("org", [None])[0]) or api.default_org_id(conn)
+                org_id = self._authz_org(conn, q.get("org", [None])[0])
                 if not org_id:
                     return self._json(404, {"error": "no organizations"})
                 return self._json(200, api.summary_json(conn, org_id))
@@ -120,6 +204,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._dashboard(conn, q)
             return self._send(404, views.simple_page("Not found", "404",
                               f"No route for <span class='num'>{path}</span>.", ok=False))
+        except PermissionError:
+            return self._json(403, {"error": "forbidden: not a member of that org"})
         except Exception as e:  # never 500 silently
             sys.stderr.write(f"plutus: GET {path} failed: {e}\n")
             return self._send(500, views.simple_page("Error", "Something broke",
@@ -132,6 +218,8 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path
         conn = self._conn()
         try:
+            if not self._gate(conn, path):
+                return
             if path == "/webhook/stripe":
                 return self._webhook(conn)
             if path == "/billing/checkout/credit":
@@ -141,6 +229,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/billing/portal":
                 return self._portal(conn)
             return self._json(404, {"error": f"no route for {path}"})
+        except PermissionError:
+            return self._json(403, {"error": "forbidden: not a member of that org"})
         except BillingError as e:
             return self._send(400, views.simple_page("Billing", "Billing not available",
                               str(e), ok=False))
@@ -152,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- views -------------------------------------------------------------
     def _dashboard(self, conn, q):
-        org_id = (q.get("org", [None])[0]) or api.default_org_id(conn)
+        org_id = self._authz_org(conn, q.get("org", [None])[0])
         if not org_id:
             return self._send(200, views.simple_page(
                 "Plutus", "No organization yet",
@@ -161,30 +251,36 @@ class Handler(BaseHTTPRequestHandler):
             ))
         from .. import metering
         summary = metering.org_summary(conn, org_id)
-        html = views.render_dashboard(
-            summary, orgs=db.list_orgs(conn), cfg=self.ctx.cfg,
+        page = views.render_dashboard(
+            summary, orgs=self._scoped_orgs(conn), cfg=self.ctx.cfg,
             stripe_status=self.ctx.stripe.status(), demo=self.ctx.demo,
-            runway=self.ctx.runway(),
+            runway=self.ctx.runway(), user=self._user,
         )
-        return self._send(200, html)
+        return self._send(200, page)
 
     # ---- billing -----------------------------------------------------------
     def _checkout_credit(self, conn):
         f = self._form()
-        org_id = f.get("org") or api.default_org_id(conn)
+        org_id = self._authz_org(conn, f.get("org"))
+        if not org_id:
+            raise BillingError("no organization to bill")
         amount = float(f.get("amount") or 50)
         sess = self.ctx.stripe.credit_checkout(conn, org_id, amount)
         return self._redirect(sess["url"])
 
     def _checkout_pro(self, conn):
         f = self._form()
-        org_id = f.get("org") or api.default_org_id(conn)
+        org_id = self._authz_org(conn, f.get("org"))
+        if not org_id:
+            raise BillingError("no organization to bill")
         sess = self.ctx.stripe.pro_checkout(conn, org_id)
         return self._redirect(sess["url"])
 
     def _portal(self, conn):
         f = self._form()
-        org_id = f.get("org") or api.default_org_id(conn)
+        org_id = self._authz_org(conn, f.get("org"))
+        if not org_id:
+            raise BillingError("no organization to bill")
         sess = self.ctx.stripe.portal(conn, org_id)
         return self._redirect(sess["url"])
 
@@ -220,10 +316,17 @@ def serve(host=None, port=None, db_path=None, demo=False, cfg=None,
     httpd = _Server((host, port), Handler, ctx)
     url = f"http://{host}:{port}/"
     stripe_mode = ctx.stripe.status()["mode"]
+    if ctx.auth_on:
+        auth_mode = f"Google OIDC ({cfg['auth'].get('base_url') or 'base_url unset!'})"
+    elif cfg.get("auth", {}).get("enabled"):
+        auth_mode = "enabled but NOT configured → open (set Google client id/secret)"
+    else:
+        auth_mode = "open (no sign-in required)"
     sys.stderr.write(
         f"\n  ◆ Plutus v{__version__} — the billing layer for AI agents\n"
         f"    dashboard:  {url}\n"
         f"    stripe:     {stripe_mode}\n"
+        f"    auth:       {auth_mode}\n"
         f"    database:   {db_path}{'  (demo data)' if demo else ''}\n"
         f"    webhook:    POST {url}webhook/stripe\n\n"
         f"  Ctrl-C to stop.\n\n"

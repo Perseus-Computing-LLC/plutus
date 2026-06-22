@@ -32,6 +32,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8420,
     },
+    "auth": {
+        # Google OIDC sign-in. Disabled by default → the dashboard is open
+        # (fine for localhost / behind a trusted proxy). Set ``enabled`` plus
+        # the Google client creds (prefer env vars) to require login. Sign-in is
+        # limited to people who are already members of an org, plus anyone in
+        # ``allowed_emails`` or at ``allowed_domain``.
+        "enabled": False,
+        "google_client_id": "",       # or env PLUTUS_GOOGLE_CLIENT_ID
+        "google_client_secret": "",   # or env PLUTUS_GOOGLE_CLIENT_SECRET
+        "base_url": "",               # public origin, e.g. https://plutus.perseus.observer
+        "allowed_emails": [],         # extra emails allowed to sign in
+        "allowed_domain": "",         # e.g. "perseus.observer" — any address here may sign in
+        "provision_org_id": "",       # if set, a newly-allowed email joins this org as 'member'
+        "session_ttl_hours": 168,     # session lifetime (7 days)
+    },
     "billing": {
         # Stripe is optional. Leave keys empty to run fully offline; the
         # dashboard shows billing in "test/offline" mode and Checkout is
@@ -161,6 +176,22 @@ def load() -> dict:
             cfg["server"]["port"] = int(env["PLUTUS_PORT"])
         except ValueError:
             pass
+
+    # auth / OIDC overrides
+    if env.get("PLUTUS_AUTH_ENABLED"):
+        cfg["auth"]["enabled"] = env["PLUTUS_AUTH_ENABLED"].strip().lower() in (
+            "1", "true", "yes", "on")
+    if env.get("PLUTUS_GOOGLE_CLIENT_ID"):
+        cfg["auth"]["google_client_id"] = env["PLUTUS_GOOGLE_CLIENT_ID"]
+    if env.get("PLUTUS_GOOGLE_CLIENT_SECRET"):
+        cfg["auth"]["google_client_secret"] = env["PLUTUS_GOOGLE_CLIENT_SECRET"]
+    if env.get("PLUTUS_BASE_URL"):
+        cfg["auth"]["base_url"] = env["PLUTUS_BASE_URL"]
+    if env.get("PLUTUS_ALLOWED_EMAILS"):
+        cfg["auth"]["allowed_emails"] = [
+            e.strip() for e in env["PLUTUS_ALLOWED_EMAILS"].split(",") if e.strip()]
+    if env.get("PLUTUS_ALLOWED_DOMAIN"):
+        cfg["auth"]["allowed_domain"] = env["PLUTUS_ALLOWED_DOMAIN"]
     return cfg
 
 
@@ -175,6 +206,7 @@ def _strip_env_secrets(cfg: dict) -> dict:
         ("billing", "stripe_publishable_key", "STRIPE_PUBLISHABLE_KEY"),
         ("billing", "stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
         ("alerts", "smtp_password", "PLUTUS_SMTP_PASSWORD"),
+        ("auth", "google_client_secret", "PLUTUS_GOOGLE_CLIENT_SECRET"),
     ]
     for section, key, envvar in pairs:
         val = out.get(section, {}).get(key)
@@ -206,3 +238,14 @@ def ensure_initialized() -> tuple[Path, bool]:
 
 def stripe_enabled(cfg: dict) -> bool:
     return bool(cfg.get("billing", {}).get("stripe_secret_key"))
+
+
+def auth_enabled(cfg: dict) -> bool:
+    """True only when login is both turned on AND fully configured.
+
+    If ``auth.enabled`` is set but the Google client creds are missing we treat
+    auth as *off* rather than locking everyone out of a misconfigured server.
+    """
+    a = cfg.get("auth", {})
+    return bool(a.get("enabled") and a.get("google_client_id")
+                and a.get("google_client_secret"))
