@@ -1,42 +1,70 @@
-# Plutus — the billing layer for AI agents
+# Plutus — LLM FinOps Tool
 
 [![Test](https://github.com/Perseus-Computing-LLC/plutus/actions/workflows/test.yml/badge.svg)](https://github.com/Perseus-Computing-LLC/plutus/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/plutus-agent.svg)](https://pypi.org/project/plutus-agent/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **You wouldn't run a SaaS without billing. Don't run AI agents without Plutus.**
-
-Plutus is **self-hosted, Stripe-integrated usage metering and prepaid-credit billing for LLM / AI-agent spend.** Point your agents at it and you get a real-time dark dashboard of where the money goes — per organization, per workspace, per provider, per task type — with prepaid credits that deplete as calls route through, low-balance and budget-cap alerts, and monthly PDF spend reports.
-
-Everything except Stripe works **fully offline**. State is a single SQLite file. No Plutus cloud. No lock-in.
-
-```bash
-pip install plutus-agent
-plutus demo            # → dark dashboard with realistic data at http://localhost:8420
-```
-
-<p align="center"><em>◆ <a href="https://perseus.observer/plutus/">perseus.observer/plutus</a> · Perseus Computing LLC</em></p>
-
----
-
-## Start in 30 seconds
+> Named for the Greek god of wealth. Plutus is a standalone provider credit monitor and cost-aware model router for multi-provider LLM stacks.
 
 ```bash
 pip install plutus-agent          # PyPI; stdlib + PyYAML, Stripe optional
 plutus demo                       # zero-setup tour with a month of sample data
 #   → open http://localhost:8420
 ```
+  ____  _       _
+ |  _ \| |_   _| |_ _   _ ___
+ | |_) | | | | | __| | | / __|   god of wealth
+ |  __/| | |_| | |_| |_| \__ \   provider credit monitor
+ |_|   |_|\__,_|\__|\__,_|___/
+  generated 2026-06-20 09:08:00
 
-**Running Claude Code or Codex?** See exactly where your spend goes, per project, in one command:
-
-```bash
-plutus install-claude-hook        # meters every Claude Code turn automatically
-plutus serve                      # → http://localhost:8420
+PROVIDER        BALANCE     REMAIN     TODAY        7D       30D        ALL    $/DAY   DAYS SRC
+-----------------------------------------------------------------------------------------------
+deepseek         $49.74          —    $50.51    $99.88   $198.91    $198.91   $14.27      4 live
+anthropic             —          —    $55.73    $55.73    $55.73     $55.73    $7.96      ∞ est
+google                —          —     $0.01     $0.15     $0.15      $0.15    $0.02      ∞ est
+openai                —          —     $0.00     $0.00     $0.00      $0.00    $0.00      ∞ est
+-----------------------------------------------------------------------------------------------
+TOTAL                                $106.24   $155.76   $254.79    $254.79
 ```
 
-→ [docs/claude-code.md](docs/claude-code.md)
+## What Plutus does
 
-Real setup is three commands:
+Plutus is an **LLM FinOps tool** — it tracks your spend across every LLM provider and balances routing to maximize credit runway:
+
+| Capability | Description |
+|---|---|
+| **Live balance monitoring** | Pulls real balance from provider APIs (DeepSeek, OpenAI) |
+| **Spend tracking** | 7-day, 30-day, and all-time burn rates per provider |
+| **Budget estimation** | For providers without balance APIs (Anthropic, Google, custom), tracks remaining against declared budgets |
+| **Runway forecasting** | Projects days-until-exhaustion and exhaustion dates |
+| **Cost-aware routing** | Rewrites model routing to favor providers with the most runway, with optional cost-cap/latency/quality policies |
+| **Multi-channel alerts** | Email (Himalaya), Discord webhook, ntfy.sh — configurable thresholds |
+| **HTML dashboard** | Dark-themed dashboard with SVG sparkline trend lines |
+| **Backtest mode** | Replay session history against routing policies to measure savings before deploying |
+
+## Quick start
+
+```bash
+# Install
+pip install plutus
+
+# Monitor your providers
+plutus
+
+# Forecast budget exhaustion
+plutus forecast
+
+# Set up budgets for providers without balance APIs
+plutus --calibrate anthropic=74.46 --calibrate google=93.59
+
+# Route your model stack by runway
+plutus-route --dry-run
+plutus-route --apply
+
+# Backtest a routing policy before deploying
+plutus-route --backtest cost-cap
+```
 
 ```bash
 plutus init --org "Acme Agents" --tier pro --workspace ci --budget 100
@@ -60,154 +88,128 @@ plutus.track(provider="anthropic", model="claude-opus-4-8",
 print(plutus.balance())           # remaining prepaid credit
 ```
 
-## What you get
+Plutus reads your session history from a SQLite state database (Hermes Agent `state.db` by default, configurable) and fuses it with live balance APIs:
 
 | | |
 |---|---|
-| **Real-time dashboard** | Dark-themed (`#0c0814`), spend today/7d/30d/MTD, per-workspace budget bars, provider health, cost-per-task ROI, live activity feed. Numbers refresh every 5s. `plutus serve` at `:8420`. |
-| **Multi-tenant** | Organizations → workspaces → users. Meter per workspace, per provider, per model, per task type. |
-| **Prepaid credits** | An append-only ledger that depletes as calls route through. Balance is always the sum of deltas — auditable, never drifts. |
-| **Stripe billing** | Checkout Sessions for credit top-ups + the $20/mo Pro plan, the Customer Portal for self-serve management, and an **idempotent** webhook handler. Test-mode friendly. |
-| **Alerts** | Email on low balance or when a workspace nears/exceeds its monthly budget cap. De-duped, offline-safe (dry-run without SMTP). |
-| **Monthly reports** | Print-ready spend reports — PDF when `reportlab` is installed, clean HTML otherwise. |
-| **Pricing tiers** | Free (10K tracked tokens/mo, 1 workspace), Pro ($20/mo, unlimited tracking, 10 workspaces, credits + alerts + reports), Enterprise (custom, SSO, SLA). |
+| **Live balance API** | DeepSeek, OpenAI — real-time dollar balances via REST |
+| **Spend ledger** | All providers — per-session cost rows (actual or estimated), token counts |
+| **Declared budgets** | Providers without balance APIs — you set a starting budget, Plutus tracks remaining |
 
-## Why Plutus — vs. the alternatives
+For estimate-based providers, `--calibrate` back-solves the budget from your real console balance and all-time ledger spend, then projects remaining going forward. Self-correcting over time.
 
-| | Manual console-checking | Spreadsheet | **Nothing** | **Plutus** |
-|---|:---:|:---:|:---:|:---:|
-| One view across all providers | ❌ (one console each) | 🟡 (you paste it) | ❌ | ✅ |
-| Real-time | ❌ | ❌ | ❌ | ✅ (5s refresh) |
-| Per-workspace / per-task attribution | ❌ | 🟡 | ❌ | ✅ |
-| Prepaid credit that auto-depletes | ❌ | ❌ | ❌ | ✅ |
-| Low-balance / budget alerts | ❌ | ❌ | ❌ | ✅ |
-| Charge *your* customers (Stripe) | ❌ | ❌ | ❌ | ✅ |
-| Cost to run | your time | your time | a surprise invoice | one SQLite file |
+## Routing policies
 
-If you run agents and you're tracking spend by logging into three billing consoles — or not at all — you already need this.
+`plutus-route` supports configurable routing policies beyond pure runway:
 
-## The dashboard
+| Policy | Behavior |
+|---|---|
+| `runway` (default) | Max days-left wins |
+| `cost-cap` | Hard ceiling per 1M tokens, prefer cheapest under cap |
+| `latency-weighted` | Prefer faster models, penalize slow ones |
+| `quality-floor` | Filter out models below a benchmark score |
+| Stacked | Comma-separated, e.g. `cost-cap,quality-floor` |
 
-`plutus serve` (or `plutus demo`) serves a single dark pane at **`:8420`**:
-
-- **Headline cards** — credit balance (turns coral when low), spend today, month-to-date, tracked-tokens-vs-plan meter.
-- **Spend by workspace** — with budget-cap progress bars that go coral past 80%.
-- **Providers** — health dot (live/idle/stale), trailing `$/day` burn, last-seen.
-- **Cost per task type** — the ROI lens: `$/task` for code review vs chat vs research.
-- **Live activity** — the most recent metered calls, estimated vs exact.
-- **Billing** — buy prepaid credit, upgrade to Pro, or open the Stripe Customer Portal.
-
-It's framework-free (stdlib `http.server`), CSP-safe, and serves the same on a laptop or a `$5` VPS.
-
-## Stripe (test mode)
-
-Plutus runs fully offline until you give it a key. Then:
-
-```bash
-export STRIPE_SECRET_KEY=sk_test_...        # start in test mode
-plutus stripe-setup                         # creates the $20/mo Pro price for you
-plutus serve
-stripe listen --forward-to localhost:8420/webhook/stripe   # local dev
+Configure in `plutus.budgets.json`:
+```json
+{
+  "routing": {
+    "policy": "cost-cap,quality-floor",
+    "cost_max_per_1m": 5.0,
+    "quality_min_score": 70
+  }
+}
 ```
 
-Full walkthrough — take a test payment and watch credit top up — in **[BILLING.md](BILLING.md)**.
+Override via CLI: `plutus-route --policy runway`
 
-- **Buy credit** → one-time Checkout Session → `checkout.session.completed` tops up the ledger.
-- **Upgrade to Pro** → subscription Checkout → subscription webhooks move the org between `pro`/`free`.
-- **Manage billing** → Stripe Customer Portal.
-- Every webhook is verified and recorded by event id, so a replay never double-credits.
+## Adding custom providers
 
-## Deploy with Docker
+Add any OpenAI-compatible endpoint to `plutus.budgets.json`:
 
-```bash
-docker compose up                  # dashboard at http://localhost:8420 (demo data)
-# real use:
-docker run -p 8420:8420 -v plutus:/data \
-  -e STRIPE_SECRET_KEY=sk_test_... \
-  ghcr.io/perseus-computing-llc/plutus serve --host 0.0.0.0
+```json
+{
+  "providers": {
+    "my-provider": {
+      "endpoint": "https://api.example.com/v1",
+      "api_key_env": "MY_PROVIDER_KEY",
+      "budget_usd": 100.0,
+      "models": {
+        "flagship": "model-name",
+        "subtask": "model-name-fast"
+      }
+    }
+  }
+}
 ```
 
-State persists in the `/data` volume (`config.yaml` + `plutus.db`).
-
-## Integrations
-
-Thin, dependency-free adapters in [`plutus_agent/integrations`](plutus_agent/integrations) and runnable [`examples/`](examples):
-
-- **Anthropic / OpenAI SDKs** — `track_anthropic(meter, response)` / `track_openai(meter, response)` read `response.usage` for you.
-- **Hermes Agent** — push each session as it completes, or back-fill an existing `state.db` ([`examples/hermes_integration.py`](examples/hermes_integration.py)).
-- **Claude Code / Codex CLI** — `plutus install-claude-hook` wires a `Stop` hook that meters every turn, attributed per project ([docs/claude-code.md](docs/claude-code.md)).
-
-## CLI
-
-```text
-plutus init        create ~/.plutus/{config.yaml,plutus.db}
-plutus serve       run the dashboard + API at :8420   (--demo for sample data)
-plutus demo        serve with realistic sample data (zero setup)
-plutus status      orgs, balances, Stripe mode
-plutus org         create | list organizations
-plutus workspace   create | list workspaces (--budget for a monthly cap)
-plutus meter       record a usage event (depletes credit)
-plutus topup       add prepaid credit
-plutus report      monthly PDF/HTML spend report (--month YYYY-MM)
-plutus alerts      deliver pending low-balance / budget alerts
-plutus stripe-setup       create the $20/mo Pro price in your Stripe account
-plutus install-claude-hook  meter Claude Code / Codex turns automatically
-plutus monitor     print live provider runway (bridges to plutus.py)
-plutus pricing     show plan tiers
-```
+Plutus discovers providers from your Hermes config (or env vars) plus the budgets file. No hardcoded limits.
 
 ## Configuration
 
-`~/.plutus/config.yaml` (created by `plutus init`). Secrets prefer environment variables:
+| Env var | Default | Purpose |
+|---|---|---|
+| `PLUTUS_HERMES_CONFIG` | Hermes config path | Provider keys + routing config |
+| `PLUTUS_STATE_DB` | Hermes state.db path | Session/spend ledger |
+| `PLUTUS_BUDGETS` | `./plutus.budgets.json` | Provider budgets, alerts, routing policy |
+| `PLUTUS_PROVIDERS` | `deepseek,anthropic,google,openai` | Which providers to track |
+| `PLUTUS_SNAPSHOTS` | `./plutus.snapshots.jsonl` | Burn-rate history |
 
-| Env var | Purpose |
-|---|---|
-| `PLUTUS_HOME` | Plutus home dir (default `~/.plutus`) |
-| `PLUTUS_DB` / `PLUTUS_PORT` | Override DB path / dashboard port |
-| `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` | Stripe API keys |
-| `STRIPE_WEBHOOK_SECRET` / `STRIPE_PRICE_PRO` | Webhook signing secret / Pro Price ID |
-| `PLUTUS_SMTP_PASSWORD` | SMTP password for alert email |
+## Alerts
+
+```json
+{
+  "alerts": {
+    "email": {
+      "to": "you@example.com",
+      "balance_threshold_usd": 10.0,
+      "days_left_threshold": 3
+    },
+    "discord": {
+      "webhook_url": "https://discord.com/api/webhooks/..."
+    },
+    "ntfy": {
+      "topic": "plutus-alerts",
+      "server": "https://ntfy.sh"
+    }
+  }
+}
+```
+
+Run: `plutus alert` (or `plutus alert --dry-run` to preview).
+
+## Comparisons
+
+| Tool | Scope | Plutus advantage |
+|---|---|---|
+| **Braintrust** | LLM eval + observability | Plutus focuses on credit/financial management |
+| **Helicone** | LLM observability + proxy | Plutus balances routing by credit runway, not just logging |
+| **Finout/Datadog** | General cloud cost management | Plutus is LLM-native — knows model pricing, token costs, provider APIs |
+| **LangSmith** | LLM tracing + eval | Plutus handles the money — which provider is cheapest, which has runway |
+
+Plutus is the missing piece between LLM ops tools and cloud cost tools: LLM-specific FinOps.
 
 Provider price tables (used to *estimate* cost from tokens when an exact cost isn't supplied) are overridable under `pricing.overrides`.
 
----
+Designed to run on a schedule. Typical cron setup:
+
+```bash
+# Every hour: refresh dashboard, snapshot, rebalance
+*/60 * * * * cd /path/to/plutus && ./plutus-refresh.sh
+
+# Every 3 days: check estimates
+0 9 */3 * * cd /path/to/plutus && plutus alert
+```
 
 ## The credit monitor (`plutus.py`)
 
-Plutus started as — and still ships — a **provider credit & spend monitor + runway-based model router** for [Hermes Agent](https://github.com/NousResearch/hermes-agent). These run independently of the billing engine and remain the live FinOps tooling:
-
-- **`plutus.py`** — live DeepSeek balance API + Hermes `state.db` ledger fused per provider; CLI / `--json` / `--html` dashboard; `--calibrate` back-solves budgets for providers without a balance API.
-- **`plutus_route.py`** — ranks providers by projected days-left and rewrites Hermes routing (primary / delegation / fallbacks), with backup + round-trip verification + a no-op guard so a config write can never lose a key.
-
-```bash
-python3 plutus.py                      # pretty CLI table
-python3 plutus.py --calibrate anthropic=74.46
-python3 plutus_route.py --dry-run      # preview runway-based routing
-```
-
-The billing engine can fold this live runway into its dashboard — set `monitor.enabled` + `monitor.command` in `config.yaml`, or run `plutus monitor`. See the original monitor docs in [`ROADMAP.md`](ROADMAP.md) and [`HANDOFF.md`](HANDOFF.md).
-
-## Layout
-
-```
-plutus.py, plutus_route.py     the live credit monitor + router (unchanged)
-plutus_agent/                  the monetization engine (this package)
-  cli.py  config.py  db.py  pricing.py  metering.py  client.py  bridge.py
-  reports.py  alerts.py  demo.py
-  billing/stripe_client.py     Checkout, Portal, idempotent webhooks
-  server/{app,views,api}.py    stdlib dashboard + JSON API at :8420
-  integrations/                Anthropic / OpenAI / Hermes adapters
-examples/                      quickstart, Hermes, Claude Code hook
-tests/                         engine + server test suites
-```
-
-## Development
-
-```bash
-pip install -e ".[dev]"        # stripe + reportlab + pytest
-python -m unittest discover -s tests -v
-python -m unittest test_plutus # the original monitor's suite
-```
+| File | Purpose |
+|---|---|
+| `plutus.py` | Monitor (balance, spend, runway, forecast, calibrate, alert) |
+| `plutus_route.py` | Balancer (runway-based routing + policy engine + backtest) |
+| `plutus-refresh.sh` | Cron driver |
+| `plutus.budgets.example.json` | Budget/alerts/routing template |
+| `test_plutus.py` | Test suite |
 
 ## License
 
