@@ -27,6 +27,15 @@ plutus demo                       # zero-setup tour with a month of sample data
 #   → open http://localhost:8420
 ```
 
+**Running Claude Code or Codex?** See exactly where your spend goes, per project, in one command:
+
+```bash
+plutus install-claude-hook        # meters every Claude Code turn automatically
+plutus serve                      # → http://localhost:8420
+```
+
+→ [docs/claude-code.md](docs/claude-code.md)
+
 Real setup is three commands:
 
 ```bash
@@ -95,13 +104,13 @@ It's framework-free (stdlib `http.server`), CSP-safe, and serves the same on a l
 Plutus runs fully offline until you give it a key. Then:
 
 ```bash
-export STRIPE_SECRET_KEY=sk_test_...
-export STRIPE_WEBHOOK_SECRET=whsec_...
-export STRIPE_PRICE_PRO=price_...          # your $20/mo Price ID
+export STRIPE_SECRET_KEY=sk_test_...        # start in test mode
+plutus stripe-setup                         # creates the $20/mo Pro price for you
 plutus serve
-# point Stripe's webhook at  POST http://your-host:8420/webhook/stripe
 stripe listen --forward-to localhost:8420/webhook/stripe   # local dev
 ```
+
+Full walkthrough — take a test payment and watch credit top up — in **[BILLING.md](BILLING.md)**.
 
 - **Buy credit** → one-time Checkout Session → `checkout.session.completed` tops up the ledger.
 - **Upgrade to Pro** → subscription Checkout → subscription webhooks move the org between `pro`/`free`.
@@ -126,7 +135,7 @@ Thin, dependency-free adapters in [`plutus_agent/integrations`](plutus_agent/int
 
 - **Anthropic / OpenAI SDKs** — `track_anthropic(meter, response)` / `track_openai(meter, response)` read `response.usage` for you.
 - **Hermes Agent** — push each session as it completes, or back-fill an existing `state.db` ([`examples/hermes_integration.py`](examples/hermes_integration.py)).
-- **Claude Code / Codex CLI** — a `Stop`-hook script that meters every turn ([`examples/claude_code_hook.py`](examples/claude_code_hook.py)).
+- **Claude Code / Codex CLI** — `plutus install-claude-hook` wires a `Stop` hook that meters every turn, attributed per project ([docs/claude-code.md](docs/claude-code.md)).
 
 ## CLI
 
@@ -141,6 +150,8 @@ plutus meter       record a usage event (depletes credit)
 plutus topup       add prepaid credit
 plutus report      monthly PDF/HTML spend report (--month YYYY-MM)
 plutus alerts      deliver pending low-balance / budget alerts
+plutus stripe-setup       create the $20/mo Pro price in your Stripe account
+plutus install-claude-hook  meter Claude Code / Codex turns automatically
 plutus monitor     print live provider runway (bridges to plutus.py)
 plutus pricing     show plan tiers
 ```

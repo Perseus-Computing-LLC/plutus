@@ -1,0 +1,72 @@
+name: Release
+
+# Push a tag like `v0.2.0` to publish:
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# PyPI uses Trusted Publishing (OIDC) — no stored token. One-time setup:
+#   pypi.org → your project → Publishing → add a GitHub publisher:
+#     owner=Perseus-Computing-LLC  repo=plutus  workflow=release.yml  env=pypi
+# The Docker image publishes to GHCR using the built-in GITHUB_TOKEN (no setup).
+
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # required for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          pip install build
+          python -m build
+      - name: Check metadata
+        run: |
+          pip install twine
+          twine check dist/*
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  docker:
+    name: Publish Docker image to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # push to ghcr.io
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/perseus-computing-llc/plutus
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

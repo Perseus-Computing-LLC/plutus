@@ -225,6 +225,105 @@ def cmd_monitor(args):
     print(json.dumps(data, indent=2))
 
 
+HOOK_MODULE = "plutus_agent.integrations.claude_code_hook"
+
+
+def _hook_command():
+    exe = sys.executable or "python"
+    q = f'"{exe}"' if " " in exe else exe
+    return f"{q} -m {HOOK_MODULE}"
+
+
+def _merge_stop_hook(settings: dict, command: str):
+    """Merge a Stop-hook entry into a Claude Code settings dict (idempotent).
+
+    Returns (settings, changed). Pure function so it's easy to test.
+    """
+    hooks = settings.setdefault("hooks", {})
+    stop = hooks.setdefault("Stop", [])
+    for group in stop:
+        for h in (group or {}).get("hooks", []):
+            if HOOK_MODULE in (h.get("command") or ""):
+                return settings, False
+    stop.append({"hooks": [{"type": "command", "command": command}]})
+    return settings, True
+
+
+def cmd_install_hook(args):
+    command = _hook_command()
+    if args.print:
+        import json as _json
+        snippet = {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": command}]}]}}
+        print(_json.dumps(snippet, indent=2))
+        print(f"\n  Add the above to {args.path or '~/.claude/settings.json'}")
+        return
+    path = Path(args.path) if args.path else (Path.home() / ".claude" / "settings.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    settings = {}
+    if path.exists():
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except Exception as e:
+            sys.exit(f"plutus: could not parse {path}: {e}")
+        backup = path.with_suffix(path.suffix + ".plutus-bak")
+        backup.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    settings, changed = _merge_stop_hook(settings, command)
+    if not changed:
+        _ok(f"Claude Code hook already installed in {path}")
+        return
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    _ok(f"installed Plutus Stop hook → {path}")
+    _ok("every Claude Code turn now meters into Plutus (org 'Claude Code', "
+        "workspace = project name)")
+    print(f"\n  Try it:  run a Claude Code turn, then  plutus serve  → http://localhost:8420")
+    print(f"  Set PLUTUS_ORG to attribute turns to a specific org.\n")
+
+
+def cmd_stripe_setup(args):
+    cfg = cfgmod.load()
+    key = cfg.get("billing", {}).get("stripe_secret_key") or ""
+    if not key:
+        sys.exit("plutus: no Stripe key. Set STRIPE_SECRET_KEY (use a sk_test_… key first).")
+    try:
+        import stripe
+    except ImportError:
+        sys.exit("plutus: Stripe SDK not installed. Run `pip install 'plutus-agent[stripe]'`.")
+    stripe.api_key = key
+    mode = "TEST" if key.startswith("sk_test_") else "LIVE"
+    print(f"  Stripe {mode} mode — setting up the Pro plan…")
+
+    lookup = "plutus_pro_monthly"
+    price = None
+    try:
+        existing = stripe.Price.list(lookup_keys=[lookup], limit=1, expand=["data.product"])
+        if existing.data:
+            price = existing.data[0]
+            _ok(f"found existing Pro price: {price.id}")
+    except Exception:
+        pass
+    if price is None:
+        product = stripe.Product.create(
+            name="Plutus Pro",
+            description="Plutus Pro — unlimited tracking, prepaid credits, alerts, reports.",
+        )
+        price = stripe.Price.create(
+            product=product.id, unit_amount=2000, currency="usd",
+            recurring={"interval": "month"}, lookup_key=lookup,
+        )
+        _ok(f"created Pro product {product.id} + price {price.id} ($20/mo)")
+
+    cfg["billing"]["stripe_price_pro"] = price.id
+    saved = cfgmod.save(cfg)
+    _ok(f"wrote stripe_price_pro to {saved}")
+    print("\n  Next:")
+    print("    1. plutus serve                       # dashboard with Checkout enabled")
+    print("    2. stripe listen --forward-to localhost:8420/webhook/stripe")
+    print("    3. Buy credit on the dashboard, or:")
+    print("       stripe trigger checkout.session.completed")
+    print("    4. Watch the balance top up. See BILLING.md for the full flow.\n")
+
+
 def cmd_version(args):
     print(f"plutus v{__version__} — {__tagline__}")
 
@@ -308,6 +407,16 @@ def build_parser():
     pa.add_argument("--org")
     pa.add_argument("--test", action="store_true", help="(reserved) force-check")
     pa.set_defaults(func=cmd_alerts)
+
+    ph = sub.add_parser("install-claude-hook",
+                        help="wire Plutus into Claude Code / Codex (Stop hook)")
+    ph.add_argument("--path", help="settings.json path (default ~/.claude/settings.json)")
+    ph.add_argument("--print", action="store_true", help="print the snippet, don't write")
+    ph.set_defaults(func=cmd_install_hook)
+
+    pss = sub.add_parser("stripe-setup",
+                         help="create the $20/mo Pro price in your Stripe account")
+    pss.set_defaults(func=cmd_stripe_setup)
 
     sub.add_parser("monitor", help="print live provider runway (bridge)").set_defaults(func=cmd_monitor)
     sub.add_parser("pricing", help="show plan tiers").set_defaults(func=cmd_pricing)

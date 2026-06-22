@@ -228,5 +228,45 @@ class TestReports(unittest.TestCase):
             drop_conn(conn)
 
 
+class TestClaudeHook(unittest.TestCase):
+    def test_merge_is_idempotent(self):
+        from plutus_agent import cli
+        cmd = cli._hook_command()
+        settings = {}
+        settings, changed = cli._merge_stop_hook(settings, cmd)
+        self.assertTrue(changed)
+        self.assertEqual(len(settings["hooks"]["Stop"]), 1)
+        settings, changed = cli._merge_stop_hook(settings, cmd)
+        self.assertFalse(changed)  # not added twice
+        self.assertEqual(len(settings["hooks"]["Stop"]), 1)
+
+    def test_merge_preserves_existing_hooks(self):
+        from plutus_agent import cli
+        settings = {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "echo existing"}]}]},
+            "model": "claude-opus-4-8"}
+        settings, changed = cli._merge_stop_hook(settings, cli._hook_command())
+        self.assertTrue(changed)
+        self.assertEqual(len(settings["hooks"]["Stop"]), 2)
+        self.assertEqual(settings["model"], "claude-opus-4-8")  # untouched
+
+    def test_hook_meters_payload(self):
+        import os
+        from plutus_agent.integrations import claude_code_hook
+        d = os.path.join(tempfile.mkdtemp(), "hook.db")
+        os.environ["PLUTUS_DB"] = d
+        os.environ["PLUTUS_ORG"] = "HookTest"
+        try:
+            res = claude_code_hook.meter_payload({
+                "usage": {"input_tokens": 1000, "output_tokens": 500,
+                          "cache_read_input_tokens": 200},
+                "model": "claude-opus-4-8", "cwd": "/home/me/proj-x"})
+            self.assertGreater(res.cost_usd, 0)
+            self.assertEqual(res.task_type, "coding")
+        finally:
+            os.environ.pop("PLUTUS_DB", None)
+            os.environ.pop("PLUTUS_ORG", None)
+
+
 if __name__ == "__main__":
     unittest.main()
