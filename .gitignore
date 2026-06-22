@@ -13,3 +13,15 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# plutus_agent (monetization engine) artifacts
+build/
+dist/
+*.egg-info/
+*.db
+*.db-wal
+*.db-shm
+quickstart.db
+.playwright-mcp/
+plutus-*.pdf
+plutus-*.html

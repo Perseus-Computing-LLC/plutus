@@ -40,3 +40,34 @@ jobs:
 
       - name: Run tests
         run: python3 -m pytest test_plutus.py -v
+
+  engine:
+    name: monetization engine (plutus_agent)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package (with extras)
+        run: pip install ".[all]" pytest
+
+      - name: Lint — compileall
+        run: python3 -m compileall -q plutus_agent
+
+      - name: CLI smoke
+        run: |
+          plutus version | grep 'plutus v'
+          plutus pricing | grep -i 'Pro'
+          plutus init --org "CI Co" --tier pro --workspace ci --budget 10
+          plutus meter --provider anthropic --model claude-opus-4-8 \
+            --task code_review --workspace ci --input 1000 --output 500
+          plutus status
+
+      - name: Run engine + server tests
+        run: python3 -m pytest tests/ -v

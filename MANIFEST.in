@@ -1,0 +1,5 @@
+include README.md LICENSE ROADMAP.md
+recursive-include plutus_agent/assets *
+recursive-include examples *.py
+graft tests
+global-exclude *.pyc __pycache__ *.db *.db-wal *.db-shm
