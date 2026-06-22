@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS organizations (
@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS stripe_events (
     type         TEXT NOT NULL,
     processed_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,        -- opaque random; lives in an HttpOnly cookie
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -189,6 +197,92 @@ def org_by_stripe_customer(conn, customer_id: str) -> Optional[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM organizations WHERE stripe_customer_id=?", (customer_id,)
     ).fetchone()
+
+
+# ------------------------------------------------------------------- users ---
+def get_user(conn, user_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+
+
+def users_by_email(conn, email: str) -> list[sqlite3.Row]:
+    """All user rows for an email (a person may belong to several orgs)."""
+    return conn.execute(
+        "SELECT * FROM users WHERE lower(email)=lower(?) ORDER BY created_at", (email,)
+    ).fetchall()
+
+
+def ensure_user(conn, org_id: str, email: str, name: Optional[str] = None,
+                role: str = "member") -> sqlite3.Row:
+    """Get-or-create the user row for (org, email); backfill name if newly known."""
+    row = conn.execute(
+        "SELECT * FROM users WHERE org_id=? AND lower(email)=lower(?)",
+        (org_id, email),
+    ).fetchone()
+    if row:
+        if name and not row["name"]:
+            conn.execute("UPDATE users SET name=? WHERE id=?", (name, row["id"]))
+            conn.commit()
+            return get_user(conn, row["id"])
+        return row
+    uid = new_id("usr")
+    conn.execute(
+        "INSERT INTO users(id,org_id,email,name,role,created_at) VALUES(?,?,?,?,?,?)",
+        (uid, org_id, email, name, role, time.time()),
+    )
+    conn.commit()
+    return get_user(conn, uid)
+
+
+def list_orgs_for_email(conn, email: str) -> list[sqlite3.Row]:
+    """Orgs the email is a member of, ordered by org creation."""
+    return conn.execute(
+        "SELECT o.* FROM organizations o JOIN users u ON u.org_id=o.id "
+        "WHERE lower(u.email)=lower(?) ORDER BY o.created_at",
+        (email,),
+    ).fetchall()
+
+
+def email_in_org(conn, email: str, org_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM users WHERE org_id=? AND lower(email)=lower(?)",
+        (org_id, email),
+    ).fetchone() is not None
+
+
+# ---------------------------------------------------------------- sessions ---
+def create_session(conn, user_id: str, ttl_seconds: float) -> str:
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    conn.execute(
+        "INSERT INTO sessions(token,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+        (token, user_id, now, now + ttl_seconds),
+    )
+    conn.commit()
+    return token
+
+
+def session_user(conn, token: str) -> Optional[sqlite3.Row]:
+    """Resolve a session token to its user row, or None if missing/expired."""
+    if not token:
+        return None
+    return conn.execute(
+        "SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id "
+        "WHERE s.token=? AND s.expires_at > ?",
+        (token, time.time()),
+    ).fetchone()
+
+
+def delete_session(conn, token: str) -> None:
+    if not token:
+        return
+    conn.execute("DELETE FROM sessions WHERE token=?", (token,))
+    conn.commit()
+
+
+def purge_expired_sessions(conn) -> int:
+    cur = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (time.time(),))
+    conn.commit()
+    return cur.rowcount
 
 
 # ------------------------------------------------------------- workspaces ----

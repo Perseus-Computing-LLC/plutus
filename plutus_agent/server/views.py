@@ -138,7 +138,7 @@ def _e(s):
 
 def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
                      stripe_status: dict, demo: bool = False,
-                     runway: dict | None = None) -> str:
+                     runway: dict | None = None, user=None) -> str:
     org = summary["org"]
     tier = summary["tier"]
     w = summary["windows"]
@@ -159,6 +159,14 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
     )
     orgsel = (f"<select class='orgsel' onchange=\"location.href='/?org='+this.value\">{opts}</select>"
               if len(orgs) > 1 else "")
+
+    # signed-in chip (only when auth is on and a user is bound to the request)
+    userchip = ""
+    if user is not None:
+        ident = (user["name"] or user["email"]) if hasattr(user, "keys") else str(user)
+        userchip = (
+            "<span style='font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center'>"
+            f"{_e(ident)} · <a href='/auth/logout' style='color:var(--muted)'>Sign out</a></span>")
 
     # tracked-tokens meter (free tier limit)
     tracked, limit = summary["tracked_tokens_mtd"], summary["tracked_limit"]
@@ -302,7 +310,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
   <div class="top">
     <div class="brand"><div class="logo">◆</div>
       <div><h1>Plutus</h1><div class="tag">{_e(__tagline__)}</div></div></div>
-    <div style="display:flex;gap:8px;align-items:center">{orgsel}{badges}</div>
+    <div style="display:flex;gap:8px;align-items:center">{orgsel}{userchip}{badges}</div>
   </div>
   {banner}
   {cards}
@@ -327,6 +335,18 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
 </div>
 <script>{POLLER}</script>
 </body></html>"""
+
+
+def login_page(login_href: str) -> str:
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Plutus — Sign in</title>{FAVICON}
+<style>{CSS}</style></head><body><div class="wrap" style="max-width:460px">
+<div class="brand" style="margin-bottom:20px"><div class="logo">◆</div><div><h1>Plutus</h1></div></div>
+<div class="panel" style="padding:28px 24px;text-align:center">
+  <h2 style="font-size:18px;padding:0;text-transform:none;letter-spacing:0">Sign in to continue</h2>
+  <div class="muted" style="margin:8px 0 22px">This dashboard is private to your organization.</div>
+  <a class="btn" href="{html.escape(login_href)}">Sign in with Google →</a>
+</div></div></body></html>"""
 
 
 def simple_page(title: str, heading: str, body: str, *, ok: bool = True) -> str:

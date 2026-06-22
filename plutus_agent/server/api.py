@@ -28,9 +28,10 @@ def summary_json(conn, org_id: str) -> dict:
     }
 
 
-def orgs_json(conn) -> list[dict]:
+def orgs_json(conn, orgs=None) -> list[dict]:
+    rows = db.list_orgs(conn) if orgs is None else orgs
     return [
         {"id": o["id"], "name": o["name"], "slug": o["slug"], "tier": o["tier"],
          "balance": db.get_balance(conn, o["id"])}
-        for o in db.list_orgs(conn)
+        for o in rows
     ]

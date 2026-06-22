@@ -2,6 +2,21 @@
 
 All notable changes to Plutus are documented here.
 
+## [0.3.0] — 2026-06-22
+
+### Added
+- **Google OIDC sign-in** for the dashboard and billing endpoints (stdlib only,
+  no auth library). Off by default; enable with `auth.enabled` + a Google OAuth
+  client. Server-side, revocable sessions (`sessions` table); access is
+  allow-listed (existing org members, plus `auth.allowed_emails` /
+  `auth.allowed_domain`); the dashboard and APIs are scoped to the signed-in
+  user's orgs (`?org=` for a non-member returns 403). See `docs/auth.md`.
+- Public-by-default paths when auth is on: `/healthz`, `/webhook/stripe`,
+  `/auth/*` — so health checks and Stripe webhooks are never challenged.
+
+### Changed
+- Schema version 2 — adds the `sessions` table (additive; auto-applied on start).
+
 ## [0.2.0] — 2026-06-21
 
 The **monetization engine** — Plutus becomes the billing layer for AI agents.
