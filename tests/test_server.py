@@ -165,6 +165,30 @@ class TestServer(unittest.TestCase):
             m.balance()
         m.close()
 
+    def test_remote_meter_sends_real_user_agent(self):
+        # Cloudflare (error 1010) hard-blocks the default "Python-urllib" UA, so
+        # the SDK must send its own or ingest breaks behind the proxy.
+        import urllib.request as ur
+        captured = {}
+
+        class _FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self):
+                return b'{"recorded": true, "cost_usd": 0.0, "balance_after": 0.0}'
+
+        orig = ur.urlopen
+        ur.urlopen = lambda req, *a, **k: (
+            captured.update(ua=req.get_header("User-agent")) or _FakeResp())
+        try:
+            Meter(remote="http://x", api_key="plutus_sk_x").track(
+                provider="anthropic", input_tokens=1)
+        finally:
+            ur.urlopen = orig
+        self.assertTrue(captured["ua"])
+        self.assertTrue(captured["ua"].startswith("plutus-agent"))
+        self.assertNotIn("urllib", captured["ua"].lower())
+
 
 class TestIngestQuota(unittest.TestCase):
     """Free org past its cap with hard-blocking on → 402."""

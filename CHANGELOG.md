@@ -2,6 +2,15 @@
 
 All notable changes to Plutus are documented here.
 
+## [0.5.1] — 2026-06-23
+
+### Fixed
+- **Ingest blocked behind Cloudflare.** The SDK's remote `Meter` and the Hermes
+  sync bridge sent the default `Python-urllib/x.y` User-Agent, which Cloudflare
+  (and similar WAFs) hard-block with **error 1010** — so `POST /v1/usage`
+  through the public origin failed for any urllib client. Both now send a real
+  `User-Agent` (`plutus-agent/<version>`). Caught while dogfooding Hermes.
+
 ## [0.5.0] — 2026-06-23
 
 The **usage ingest API** — closes the self-serve loop so a signed-up org can
