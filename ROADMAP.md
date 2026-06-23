@@ -1,5 +1,8 @@
 # Plutus Roadmap
 
+> **For the active path to a 1.0 release of the billing engine, see [ROADMAP-1.0.md](ROADMAP-1.0.md).**
+> This document is the longer-term monitor/FinOps vision.
+
 > Last updated: 2026-06-19 · Horizon: 12 months
 
 ## What Plutus Is
