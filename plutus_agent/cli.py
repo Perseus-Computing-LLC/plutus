@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, __tagline__, config as cfgmod, db, metering, pricing
@@ -170,6 +171,30 @@ def cmd_meter(args):
             print("  ▲ over free-tier token quota — upgrade to Pro for unlimited tracking")
         for a in res.alerts:
             print(f"  ▲ {a['kind']}: {a['message']}")
+    conn.close()
+
+
+def cmd_keys(args):
+    conn = _conn()
+    org = _resolve_org(conn, args.org)
+    if args.action == "create":
+        _, secret = db.create_api_key(conn, org["id"], name=args.name)
+        _ok(f"API key for '{org['name']}' — store it now, it won't be shown again:")
+        print(f"    {secret}")
+    elif args.action == "list":
+        keys = db.list_api_keys(conn, org["id"])
+        if not keys:
+            print("  (no API keys)")
+        for k in keys:
+            used = "never" if not k["last_used_at"] else f"{int((time.time()-k['last_used_at'])/86400)}d ago"
+            print(f"  {k['id']}  {k['prefix']+'…':<22} {(k['name'] or '-'):<18} used {used}")
+    elif args.action == "revoke":
+        if not args.key_id:
+            sys.exit("plutus: pass the key id to revoke, e.g. `plutus keys revoke key_…`")
+        if db.revoke_api_key(conn, args.key_id, org["id"]):
+            _ok(f"revoked {args.key_id}")
+        else:
+            print(f"  no active key '{args.key_id}' for this org")
     conn.close()
 
 
@@ -401,6 +426,13 @@ def build_parser():
     pm.add_argument("--cost", type=float, help="exact cost USD (else estimated)")
     pm.add_argument("--json", action="store_true")
     pm.set_defaults(func=cmd_meter)
+
+    pk = sub.add_parser("keys", help="manage ingest API keys")
+    pk.add_argument("action", choices=["create", "list", "revoke"])
+    pk.add_argument("key_id", nargs="?", help="key id (for revoke)")
+    pk.add_argument("--name", help="label for a new key")
+    pk.add_argument("--org")
+    pk.set_defaults(func=cmd_keys)
 
     pt = sub.add_parser("topup", help="add prepaid credit")
     pt.add_argument("--org"); pt.add_argument("--amount", type=float, required=True)

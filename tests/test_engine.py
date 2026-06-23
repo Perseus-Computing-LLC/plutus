@@ -206,6 +206,47 @@ class TestFreeTierLimits(unittest.TestCase):
         self.assertEqual(metering.tracked_tokens_mtd(self.conn, self.org), 10000)
 
 
+class TestApiKeys(unittest.TestCase):
+    def setUp(self):
+        self.conn = fresh_conn()
+        self.org = db.create_org(self.conn, "Acme", tier="free")["id"]
+
+    def tearDown(self):
+        drop_conn(self.conn)
+
+    def test_create_returns_secret_once_and_resolves(self):
+        row, secret = db.create_api_key(self.conn, self.org, name="prod")
+        self.assertTrue(secret.startswith("plutus_sk_"))
+        self.assertEqual(db.api_key_org(self.conn, secret), self.org)
+        # only a hash is stored — the raw secret is nowhere in the row
+        self.assertNotIn(secret, dict(row).values())
+        self.assertEqual(row["prefix"], secret[:14])
+
+    def test_bad_or_unknown_key_denied(self):
+        self.assertIsNone(db.api_key_org(self.conn, "nope"))
+        self.assertIsNone(db.api_key_org(self.conn, "plutus_sk_doesnotexist"))
+        self.assertIsNone(db.api_key_org(self.conn, ""))
+
+    def test_revoke_blocks_key(self):
+        row, secret = db.create_api_key(self.conn, self.org)
+        self.assertTrue(db.revoke_api_key(self.conn, row["id"], self.org))
+        self.assertIsNone(db.api_key_org(self.conn, secret))
+        self.assertEqual(db.list_api_keys(self.conn, self.org), [])
+        # revoking again is a no-op
+        self.assertFalse(db.revoke_api_key(self.conn, row["id"], self.org))
+
+    def test_revoke_scoped_to_org(self):
+        other = db.create_org(self.conn, "Other", tier="free")["id"]
+        row, _ = db.create_api_key(self.conn, self.org)
+        self.assertFalse(db.revoke_api_key(self.conn, row["id"], other))
+        self.assertEqual(len(db.list_api_keys(self.conn, self.org)), 1)
+
+    def test_last_used_touched(self):
+        _, secret = db.create_api_key(self.conn, self.org)
+        db.api_key_org(self.conn, secret)
+        self.assertIsNotNone(db.list_api_keys(self.conn, self.org)[0]["last_used_at"])
+
+
 class TestDemo(unittest.TestCase):
     def test_seed_produces_rich_data(self):
         conn = fresh_conn()

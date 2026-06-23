@@ -6,11 +6,13 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from plutus_agent import db, demo
+from plutus_agent import Meter, db, demo
+from plutus_agent.client import PlutusAuthError, PlutusError
 from plutus_agent.config import DEFAULT_CONFIG
 from plutus_agent.server import app
 
@@ -22,6 +24,7 @@ class TestServer(unittest.TestCase):
         os.close(fd)
         conn = db.connect(cls.dbpath)
         cls.org_id = demo.seed(conn, events=120)
+        _, cls.key = db.create_api_key(conn, cls.org_id, name="test")
         conn.close()
 
         ctx = app._Ctx(dict(DEFAULT_CONFIG), cls.dbpath, demo=True)
@@ -44,6 +47,19 @@ class TestServer(unittest.TestCase):
         url = f"http://127.0.0.1:{self.port}{path}"
         with urllib.request.urlopen(url, timeout=5) as r:
             return r.status, r.read().decode()
+
+    def _post(self, path, payload, token=None):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                     headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
 
     def test_healthz(self):
         status, body = self._get("/healthz")
@@ -85,6 +101,127 @@ class TestServer(unittest.TestCase):
             self.fail("expected 404")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 404)
+
+    # ---- ingest API ----------------------------------------------------------
+    def test_ingest_requires_key(self):
+        status, body = self._post("/v1/usage", {"provider": "anthropic"})
+        self.assertEqual(status, 401)
+
+    def test_ingest_bad_key_rejected(self):
+        status, _ = self._post("/v1/usage", {"provider": "anthropic"},
+                               token="plutus_sk_bogus")
+        self.assertEqual(status, 401)
+
+    def test_ingest_records_event(self):
+        status, body = self._post("/v1/usage", {
+            "provider": "anthropic", "model": "claude-opus-4-8",
+            "input_tokens": 1200, "output_tokens": 800, "workspace": "prod",
+        }, token=self.key)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["recorded"])
+        self.assertTrue(body["event_id"].startswith("evt_"))
+        self.assertGreater(body["cost_usd"], 0)
+        self.assertEqual(body["org_id"], self.org_id)
+
+    def test_ingest_missing_provider_400(self):
+        status, _ = self._post("/v1/usage", {"input_tokens": 10}, token=self.key)
+        self.assertEqual(status, 400)
+
+    def test_ingest_batch(self):
+        status, body = self._post("/v1/usage", [
+            {"provider": "anthropic", "input_tokens": 100, "cost_usd": 0.01},
+            {"provider": "google", "input_tokens": 200, "cost_usd": 0.02},
+        ], token=self.key)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["results"]), 2)
+        self.assertEqual(body["recorded"], 2)
+
+    # ---- SDK remote mode (Meter → /v1/usage) --------------------------------
+    def _remote_meter(self, **kw):
+        return Meter(remote=f"http://127.0.0.1:{self.port}", api_key=self.key, **kw)
+
+    def test_remote_meter_records(self):
+        m = self._remote_meter()
+        self.assertTrue(m.is_remote)
+        r = m.track(provider="anthropic", model="claude-opus-4-8",
+                    input_tokens=1000, output_tokens=500, workspace="prod")
+        self.assertTrue(r.recorded)
+        self.assertTrue(r.event_id.startswith("evt_"))
+        self.assertGreater(r.cost_usd, 0)
+        m.close()
+
+    def test_remote_meter_bad_key_raises(self):
+        m = Meter(remote=f"http://127.0.0.1:{self.port}", api_key="plutus_sk_bogus")
+        with self.assertRaises(PlutusAuthError):
+            m.track(provider="anthropic", input_tokens=10)
+
+    def test_remote_meter_no_key_errors(self):
+        with self.assertRaises(ValueError):
+            Meter(remote=f"http://127.0.0.1:{self.port}")
+
+    def test_remote_balance_is_local_only(self):
+        m = self._remote_meter()
+        with self.assertRaises(PlutusError):
+            m.balance()
+        m.close()
+
+
+class TestIngestQuota(unittest.TestCase):
+    """Free org past its cap with hard-blocking on → 402."""
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = db.connect(cls.dbpath)
+        db.init_schema(conn)
+        cls.org_id = db.create_org(conn, "Free Co", tier="free")["id"]
+        _, cls.key = db.create_api_key(conn, cls.org_id)
+        # blow past the 10K free cap
+        from plutus_agent import metering
+        metering.record_usage(conn, cls.org_id, provider="anthropic",
+                              input_tokens=11_000, cost_usd=0.0)
+        conn.close()
+
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["pricing"] = dict(cfg["pricing"], block_over_free_limit=True)
+        ctx = app._Ctx(cfg, cls.dbpath, demo=False)
+        cls.httpd = app._Server(("127.0.0.1", 0), app.Handler, ctx)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(cls.dbpath + ext)
+            except OSError:
+                pass
+
+    def test_over_quota_returns_402(self):
+        url = f"http://127.0.0.1:{self.port}/v1/usage"
+        req = urllib.request.Request(
+            url, data=json.dumps({"provider": "anthropic", "input_tokens": 500}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.key}"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            self.fail("expected 402")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 402)
+            body = json.loads(e.read().decode())
+            self.assertFalse(body["recorded"])
+            self.assertIn("upgrade_url", body)
+
+    def test_remote_meter_402_does_not_raise(self):
+        # An over-quota event should report recorded=False, not crash the agent.
+        m = Meter(remote=f"http://127.0.0.1:{self.port}", api_key=self.key)
+        r = m.track(provider="anthropic", input_tokens=500)
+        self.assertFalse(r.recorded)
+        self.assertTrue(r.over_free_limit)
+        m.close()
 
 
 if __name__ == "__main__":

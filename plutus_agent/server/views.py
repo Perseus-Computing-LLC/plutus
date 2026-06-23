@@ -145,7 +145,8 @@ def _e(s):
 
 def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
                      stripe_status: dict, demo: bool = False,
-                     runway: dict | None = None, user=None) -> str:
+                     runway: dict | None = None, user=None,
+                     api_keys: list | None = None) -> str:
     org = summary["org"]
     tier = summary["tier"]
     w = summary["windows"]
@@ -332,6 +333,40 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
           <tbody>{''.join(rr)}</tbody></table>
         </div>"""
 
+    # API keys panel — how an org feeds usage into the hosted instance
+    base_url = (cfg.get("auth", {}).get("base_url") or "").rstrip("/") or "http://localhost:8420"
+    key_rows = []
+    for k in (api_keys or []):
+        used = _ago(k["last_used_at"]) if k.get("last_used_at") else "never used"
+        key_rows.append(
+            f"<tr><td class='name'>{_e(k.get('name') or '—')}"
+            f"<div class='meta'>{_e(k['prefix'])}…</div></td>"
+            f"<td class='num muted'>{_e(used)}</td>"
+            f"<td style='text-align:right'><form method='post' action='/keys/revoke' style='margin:0'>"
+            f"<input type='hidden' name='org' value='{_e(org['id'])}'>"
+            f"<input type='hidden' name='key_id' value='{_e(k['id'])}'>"
+            f"<button class='btn ghost' type='submit'>Revoke</button></form></td></tr>")
+    keys_table = ("".join(key_rows)
+                  or "<tr><td colspan=3 class='empty'>No API keys yet — create one to start sending usage.</td></tr>")
+    curl = (f"curl -X POST {base_url}/v1/usage \\\n"
+            f"  -H 'Authorization: Bearer plutus_sk_…' \\\n"
+            f"  -d '{{\"provider\":\"anthropic\",\"model\":\"claude-opus-4-8\","
+            f"\"input_tokens\":1200,\"output_tokens\":800,\"workspace\":\"prod\"}}'")
+    keys_panel = f"""
+    <div class="panel" style="margin-top:16px">
+      <h2>API keys <span class="hint">send usage to /v1/usage</span></h2>
+      <table><thead><tr><th>Name</th><th>Last used</th><th></th></tr></thead>
+      <tbody>{keys_table}</tbody></table>
+      <form class="billing" method="post" action="/keys/create">
+        <input type="hidden" name="org" value="{_e(org['id'])}">
+        <span class="muted">New key:</span>
+        <input class="amt" style="width:160px" type="text" name="name" placeholder="e.g. prod agent">
+        <button class="btn" type="submit">Create key →</button>
+      </form>
+      <pre style="margin:2px 18px 14px;padding:12px 14px;background:var(--bg2);border:1px solid var(--line2);
+        border-radius:9px;overflow:auto;font-family:var(--mono);font-size:12px;color:var(--dim)">{_e(curl)}</pre>
+    </div>"""
+
     gen = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     from .. import __version__, __tagline__
     badges = (f"<span class='pill {tier['key']}'>{_e(tier['name'])} plan</span>"
@@ -368,6 +403,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
   </div>
   {runway_panel}
   <div class="panel" style="margin-top:16px"><h2>Billing <span class="hint">prepaid credits · Stripe</span></h2>{billing}</div>
+  {keys_panel}
   <div class="foot">Plutus v{__version__} · self-hosted · generated {gen} · live numbers refresh every 5s<br>
     Perseus Computing LLC · <a href="https://perseus.observer/plutus/">perseus.observer/plutus</a></div>
 </div>
@@ -426,6 +462,30 @@ def pricing_page(*, stripe_status: dict, org_id: str | None = None,
 <div class="foot">All plans are self-hostable. Stripe handles billing; cancel anytime from the customer portal.<br>
   Perseus Computing LLC · <a href="https://perseus.observer/plutus/">perseus.observer/plutus</a></div>
 </div></body></html>"""
+
+
+def api_key_created_page(secret: str, base_url: str) -> str:
+    """Show a freshly-minted API key **once** — it can't be recovered later."""
+    base = base_url.rstrip("/")
+    curl = (f"curl -X POST {base}/v1/usage \\\n"
+            f"  -H 'Authorization: Bearer {secret}' \\\n"
+            f"  -d '{{\"provider\":\"anthropic\",\"model\":\"claude-opus-4-8\","
+            f"\"input_tokens\":1200,\"output_tokens\":800,\"workspace\":\"prod\"}}'")
+    pre = ("margin-top:10px;padding:12px 14px;background:var(--bg2);border:1px solid var(--line2);"
+           "border-radius:9px;overflow:auto;font-family:var(--mono);font-size:13px")
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Plutus — API key created</title>{FAVICON}
+<style>{CSS}</style></head><body><div class="wrap" style="max-width:680px">
+<div class="brand" style="margin-bottom:20px"><div class="logo">◆</div><div><h1>Plutus</h1></div></div>
+<div class="panel" style="padding:26px 22px">
+  <h2 style="color:var(--green);font-size:18px;padding:0;text-transform:none;letter-spacing:0">API key created</h2>
+  <div class="muted" style="margin-top:8px">Copy it now — for your security, Plutus stores only a hash and
+  <strong>won't show this key again</strong>.</div>
+  <pre style="{pre};color:var(--amber)">{_e(secret)}</pre>
+  <div class="muted" style="margin-top:18px">Send usage with it:</div>
+  <pre style="{pre};color:var(--dim)">{_e(curl)}</pre>
+  <p style="margin-top:20px"><a href="/">← Back to dashboard</a></p>
+</div></div></body></html>"""
 
 
 def login_page(login_href: str) -> str:

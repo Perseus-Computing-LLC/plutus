@@ -14,13 +14,14 @@ fully offline.
 """
 from __future__ import annotations
 
+import hashlib
 import secrets
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS organizations (
@@ -108,11 +109,28 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
 
+CREATE TABLE IF NOT EXISTS api_keys (
+    id           TEXT PRIMARY KEY,        -- key_...
+    org_id       TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name         TEXT,
+    prefix       TEXT NOT NULL,           -- shown in the UI, e.g. plutus_sk_AbC1
+    token_hash   TEXT NOT NULL UNIQUE,    -- sha256 of the full secret; raw never stored
+    created_at   REAL NOT NULL,
+    last_used_at REAL,
+    revoked_at   REAL
+);
+CREATE INDEX IF NOT EXISTS ix_apikeys_org  ON api_keys(org_id);
+CREATE INDEX IF NOT EXISTS ix_apikeys_hash ON api_keys(token_hash);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 """
+
+# Public prefix for ingest API keys. The secret is `plutus_sk_<random>`; only its
+# sha256 is ever stored, and only the first few chars are kept for display.
+API_KEY_PREFIX = "plutus_sk_"
 
 
 def new_id(prefix: str) -> str:
@@ -284,6 +302,73 @@ def purge_expired_sessions(conn) -> int:
     cur = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (time.time(),))
     conn.commit()
     return cur.rowcount
+
+
+# ---------------------------------------------------------------- api keys ----
+def _hash_token(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def create_api_key(conn, org_id: str, name: Optional[str] = None) -> tuple[sqlite3.Row, str]:
+    """Mint an ingest API key for an org.
+
+    Returns ``(row, secret)``. The full ``secret`` is shown to the caller **once**
+    — only its hash is stored, so it can never be recovered later.
+    """
+    secret = API_KEY_PREFIX + secrets.token_urlsafe(24)
+    kid = new_id("key")
+    prefix = secret[:len(API_KEY_PREFIX) + 4]   # e.g. "plutus_sk_AbC1"
+    conn.execute(
+        "INSERT INTO api_keys(id,org_id,name,prefix,token_hash,created_at)"
+        " VALUES(?,?,?,?,?,?)",
+        (kid, org_id, name, prefix, _hash_token(secret), time.time()),
+    )
+    conn.commit()
+    return get_api_key(conn, kid), secret
+
+
+def get_api_key(conn, key_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM api_keys WHERE id=?", (key_id,)).fetchone()
+
+
+def list_api_keys(conn, org_id: str, include_revoked: bool = False) -> list[sqlite3.Row]:
+    q = "SELECT * FROM api_keys WHERE org_id=?"
+    if not include_revoked:
+        q += " AND revoked_at IS NULL"
+    return conn.execute(q + " ORDER BY created_at DESC", (org_id,)).fetchall()
+
+
+def revoke_api_key(conn, key_id: str, org_id: Optional[str] = None) -> bool:
+    """Revoke a key (optionally scoped to an org). Returns True if one changed."""
+    if org_id:
+        cur = conn.execute(
+            "UPDATE api_keys SET revoked_at=? WHERE id=? AND org_id=? AND revoked_at IS NULL",
+            (time.time(), key_id, org_id))
+    else:
+        cur = conn.execute(
+            "UPDATE api_keys SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+            (time.time(), key_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def api_key_org(conn, secret: str) -> Optional[str]:
+    """Resolve a presented API-key secret to its org_id, or None.
+
+    Touches ``last_used_at`` on success. Revoked keys never resolve.
+    """
+    if not secret or not secret.startswith(API_KEY_PREFIX):
+        return None
+    row = conn.execute(
+        "SELECT * FROM api_keys WHERE token_hash=? AND revoked_at IS NULL",
+        (_hash_token(secret),),
+    ).fetchone()
+    if not row:
+        return None
+    conn.execute("UPDATE api_keys SET last_used_at=? WHERE id=?",
+                 (time.time(), row["id"]))
+    conn.commit()
+    return row["org_id"]
 
 
 # ------------------------------------------------------------- workspaces ----

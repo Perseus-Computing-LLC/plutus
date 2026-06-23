@@ -2,6 +2,33 @@
 
 All notable changes to Plutus are documented here.
 
+## [0.5.0] — 2026-06-23
+
+The **usage ingest API** — closes the self-serve loop so a signed-up org can
+feed usage into a hosted instance over HTTP, with no SDK or local DB.
+
+### Added
+- **`POST /v1/usage`** — Bearer-authed JSON ingest. Meters one event or a JSON
+  array (≤1000) via an API key, returns the metered result(s) + month-to-date
+  quota. Past the free cap with `pricing.block_over_free_limit` on, it returns
+  **402** with an `upgrade_url`.
+- **API keys** — per-org `plutus_sk_…` secrets (only a SHA-256 hash is stored;
+  the secret is shown once). New `api_keys` table, `db.create_api_key` /
+  `api_key_org` / `list_api_keys` / `revoke_api_key`.
+- **Dashboard key management** — an API-keys panel (list, create, revoke) with a
+  ready-to-paste `curl` snippet; a one-time "key created" page.
+- **`plutus keys create|list|revoke`** CLI for self-hosted/local key management.
+- **SDK remote mode** — `Meter(remote="https://…", api_key="plutus_sk_…")` (or env
+  `PLUTUS_REMOTE_URL` + `PLUTUS_API_KEY`) sends each `track()` to `/v1/usage`
+  instead of a local DB. Auto-detected from env, so the bundled adapters and the
+  Claude Code hook report to a hosted instance with no code change. A 402 over
+  quota returns a non-recorded result rather than raising (won't break an agent);
+  `balance()`/`summary()`/`topup()` stay local-only.
+
+### Changed
+- Schema version 3 — adds the `api_keys` table (additive; auto-applied on start).
+- `/v1/usage` is a public path (it authenticates by API key, not a session).
+
 ## [0.4.0] — 2026-06-23
 
 The **self-serve signup funnel** — Plutus turns into a SaaS strangers can buy
