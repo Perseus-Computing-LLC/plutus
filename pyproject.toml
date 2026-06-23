@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plutus-agent"
-version = "0.4.0"
+version = "0.5.0"
 description = "The billing layer for AI agents — self-hosted, Stripe-integrated usage metering and prepaid-credit billing for LLM/agent spend."
 readme = "README.md"
 license = { text = "MIT" }

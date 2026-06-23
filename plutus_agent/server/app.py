@@ -19,6 +19,7 @@ from . import api, views, auth as authmod
 
 # Paths reachable without a session when auth is enabled.
 _PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe", "/pricing",
+                 "/v1/usage",  # authenticated by its own Bearer API key, not a session
                  "/auth/login", "/auth/callback", "/auth/logout"}
 
 
@@ -222,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not self._gate(conn, path):
                 return
+            if path == "/v1/usage":
+                return self._ingest_usage(conn)
             if path == "/webhook/stripe":
                 return self._webhook(conn)
             if path == "/billing/checkout/credit":
@@ -230,6 +233,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._checkout_pro(conn)
             if path == "/billing/portal":
                 return self._portal(conn)
+            if path == "/keys/create":
+                return self._keys_create(conn)
+            if path == "/keys/revoke":
+                return self._keys_revoke(conn)
             return self._json(404, {"error": f"no route for {path}"})
         except PermissionError:
             return self._json(403, {"error": "forbidden: not a member of that org"})
@@ -257,6 +264,7 @@ class Handler(BaseHTTPRequestHandler):
             summary, orgs=self._scoped_orgs(conn), cfg=self.ctx.cfg,
             stripe_status=self.ctx.stripe.status(), demo=self.ctx.demo,
             runway=self.ctx.runway(), user=self._user,
+            api_keys=[dict(k) for k in db.list_api_keys(conn, org_id)],
         )
         return self._send(200, page)
 
@@ -271,6 +279,106 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, views.pricing_page(
             stripe_status=self.ctx.stripe.status(),
             org_id=org_id, user=self._user, signed_in=signed_in))
+
+    # ---- ingest API --------------------------------------------------------
+    def _bearer_org(self, conn):
+        """Resolve the org from an ``Authorization: Bearer plutus_sk_…`` header."""
+        h = self.headers.get("Authorization", "")
+        if h[:7].lower() != "bearer ":
+            return None
+        return db.api_key_org(conn, h[7:].strip())
+
+    def _ingest_usage(self, conn):
+        """POST /v1/usage — meter one event (or a JSON array of them) via API key.
+
+        Returns the metered result(s). When an org on a limited tier is past its
+        quota and hard-blocking is on, the event is rejected with 402.
+        """
+        org_id = self._bearer_org(conn)
+        if not org_id:
+            return self._json(401, {"error": "invalid or missing API key"})
+        try:
+            payload = json.loads(self._body() or b"{}")
+        except Exception:
+            return self._json(400, {"error": "body must be JSON"})
+        events = payload if isinstance(payload, list) else [payload]
+        if not events or len(events) > 1000:
+            return self._json(400, {"error": "send 1–1000 events"})
+
+        from .. import metering
+        cfg = self.ctx.cfg
+        block = bool(cfg.get("pricing", {}).get("block_over_free_limit"))
+        out, n_blocked = [], 0
+        for ev in events:
+            if not isinstance(ev, dict) or not ev.get("provider"):
+                return self._json(400, {"error": "each event needs a 'provider'"})
+            try:
+                res = metering.record_usage(
+                    conn, org_id, provider=str(ev["provider"]),
+                    model=ev.get("model"), task_type=ev.get("task_type", "general"),
+                    workspace=ev.get("workspace"),
+                    input_tokens=int(ev.get("input_tokens", 0) or 0),
+                    output_tokens=int(ev.get("output_tokens", 0) or 0),
+                    cache_read_tokens=int(ev.get("cache_read_tokens", 0) or 0),
+                    reasoning_tokens=int(ev.get("reasoning_tokens", 0) or 0),
+                    cost_usd=ev.get("cost_usd"),
+                    source=ev.get("source", "api"),
+                    pricing_overrides=cfg.get("pricing", {}).get("overrides"),
+                    alert_cfg=cfg.get("alerts", {}),
+                    block_over_limit=block,
+                )
+            except (TypeError, ValueError) as e:
+                return self._json(400, {"error": f"bad event: {e}"})
+            if not res.recorded:
+                n_blocked += 1
+            out.append({
+                "recorded": res.recorded,
+                "event_id": res.event_id or None,
+                "cost_usd": res.cost_usd,
+                "estimated": res.estimated,
+                "balance_after": res.balance_after,
+                "over_free_limit": res.over_free_limit,
+            })
+
+        st = metering.tier_status(conn, org_id)
+        body = {
+            "org_id": org_id,
+            "tracked_tokens_mtd": st["tracked_tokens"],
+            "tracked_limit": st["tracked_limit"],
+            "tier": st["tier"],
+        }
+        if len(out) == 1:
+            body.update(out[0])
+        else:
+            body["results"] = out
+            body["recorded"] = len(out) - n_blocked
+            body["blocked"] = n_blocked
+        # 402 only when nothing landed because the free quota is exhausted.
+        if n_blocked == len(out):
+            base = (cfg.get("auth", {}).get("base_url") or "").rstrip("/")
+            body["error"] = "free-tier token quota reached — upgrade to Pro"
+            body["upgrade_url"] = (base + "/pricing") if base else "/pricing"
+            return self._json(402, body)
+        return self._json(200, body)
+
+    # ---- API keys (session-gated; created from the dashboard) --------------
+    def _keys_create(self, conn):
+        f = self._form()
+        org_id = self._authz_org(conn, f.get("org"))
+        if not org_id:
+            return self._send(400, views.simple_page(
+                "API keys", "No organization", "Create an org first.", ok=False))
+        _, secret = db.create_api_key(conn, org_id, name=(f.get("name") or "").strip() or None)
+        base = (self.ctx.cfg.get("auth", {}).get("base_url") or "").rstrip("/") \
+            or f"http://{self.server.server_address[0]}:{self.server.server_address[1]}"
+        return self._send(200, views.api_key_created_page(secret, base))
+
+    def _keys_revoke(self, conn):
+        f = self._form()
+        org_id = self._authz_org(conn, f.get("org"))
+        if org_id and f.get("key_id"):
+            db.revoke_api_key(conn, f.get("key_id"), org_id)
+        return self._redirect("/")
 
     # ---- billing -----------------------------------------------------------
     def _checkout_credit(self, conn):
