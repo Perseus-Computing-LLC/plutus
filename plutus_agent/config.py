@@ -45,6 +45,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "allowed_emails": [],         # extra emails allowed to sign in
         "allowed_domain": "",         # e.g. "perseus.observer" — any address here may sign in
         "provision_org_id": "",       # if set, a newly-allowed email joins this org as 'member'
+        "allow_signup": False,        # OPEN signup: any verified Google account gets
+                                      # its own new Free-tier org (self-serve SaaS). Off
+                                      # by default so a private instance stays allow-listed.
         "session_ttl_hours": 168,     # session lifetime (7 days)
     },
     "billing": {
@@ -80,6 +83,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Override provider price tables here, shaped:
         # overrides: { anthropic: { claude-opus-4-8: {input: 15, output: 75} } }
         "overrides": {},
+        # Free-tier quota: when an org on a limited tier exceeds its monthly
+        # tracked-token allowance, events are still recorded but flagged
+        # ``over_free_limit`` so the dashboard can nudge an upgrade. Flip
+        # ``block_over_free_limit`` on to HARD-stop recording past the cap
+        # (returns a non-recorded result) — off by default so no billing data
+        # is ever silently dropped.
+        "block_over_free_limit": False,
     },
 }
 
@@ -192,6 +202,9 @@ def load() -> dict:
             e.strip() for e in env["PLUTUS_ALLOWED_EMAILS"].split(",") if e.strip()]
     if env.get("PLUTUS_ALLOWED_DOMAIN"):
         cfg["auth"]["allowed_domain"] = env["PLUTUS_ALLOWED_DOMAIN"]
+    if env.get("PLUTUS_ALLOW_SIGNUP"):
+        cfg["auth"]["allow_signup"] = env["PLUTUS_ALLOW_SIGNUP"].strip().lower() in (
+            "1", "true", "yes", "on")
     return cfg
 
 

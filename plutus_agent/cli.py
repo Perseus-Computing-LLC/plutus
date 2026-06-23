@@ -154,14 +154,20 @@ def cmd_meter(args):
         workspace=args.workspace, cost_usd=args.cost, source="cli",
         pricing_overrides=cfg.get("pricing", {}).get("overrides"),
         alert_cfg=cfg.get("alerts", {}),
+        block_over_limit=bool(cfg.get("pricing", {}).get("block_over_free_limit")),
     )
     if args.json:
         from dataclasses import asdict
         print(json.dumps(asdict(res), default=str, indent=2))
+    elif not res.recorded:
+        _ok(f"NOT metered — free-tier token quota reached. Upgrade to Pro for "
+            f"unlimited tracking. (set pricing.block_over_free_limit=false to keep recording)")
     else:
         tag = "estimated" if res.estimated else "exact"
         _ok(f"metered {args.provider}/{args.model or '-'} {args.task}: "
             f"${res.cost_usd:.6f} ({tag}) → balance ${res.balance_after:,.2f}")
+        if res.over_free_limit:
+            print("  ▲ over free-tier token quota — upgrade to Pro for unlimited tracking")
         for a in res.alerts:
             print(f"  ▲ {a['kind']}: {a['message']}")
     conn.close()

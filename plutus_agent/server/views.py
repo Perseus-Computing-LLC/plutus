@@ -44,6 +44,13 @@ a{color:var(--amber);text-decoration:none}
 .banner{margin:14px 0;border-radius:12px;border:1px solid var(--coral-dim);background:rgba(242,106,82,.08);
   padding:11px 15px;color:#ffd9cf;font-size:13px;display:flex;gap:10px;align-items:flex-start}
 .banner .x{color:var(--coral);font-weight:700}
+.upsell{margin:14px 0;border-radius:12px;border:1px solid var(--amber-dim);
+  background:linear-gradient(180deg,rgba(245,182,63,.13),rgba(245,182,63,.05));
+  padding:14px 16px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.upsell .u-txt{flex:1;min-width:240px}
+.upsell .u-h{font-weight:700;color:var(--amber)}
+.upsell .u-s{color:var(--dim);font-size:12.5px;margin-top:2px}
+.upsell form{display:flex;gap:8px;align-items:center;margin:0}
 .grid{display:grid;gap:16px}
 .cards{grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin:18px 0}
 .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
@@ -151,6 +158,36 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
         items = "".join(f"<div><span class='x'>▲</span> {_e(a['message'])}</div>"
                         for a in summary["alerts"][:3])
         banner = f"<div class='banner'><div>{items}</div></div>"
+
+    # free-tier upgrade nudge — the conversion lever
+    upsell = ""
+    ts = summary.get("tier_status") or {}
+    can_pro = stripe_status["available"] and stripe_status["has_pro_price"]
+    if ts.get("is_free") and (ts.get("over_limit") or ts.get("near_limit")
+                              or ts.get("workspaces_over")):
+        if ts.get("over_limit"):
+            head = "You've reached your Free plan limit"
+            sub = (f"{ts['tracked_tokens']:,} / {ts['tracked_limit']:,} tracked tokens "
+                   "this month. Upgrade to Pro for unlimited tracking, prepaid credits, "
+                   "and alerts.")
+        elif ts.get("near_limit"):
+            head = f"You're at {ts['tracked_pct']:.0f}% of your Free plan"
+            sub = (f"{ts['tracked_tokens']:,} / {ts['tracked_limit']:,} tracked tokens used "
+                   "this month. Pro removes the cap — $20/mo.")
+        else:
+            head = "You're at your Free plan's workspace limit"
+            sub = (f"{ts['workspaces_used']} of {ts['workspaces_limit']} workspace used. "
+                   "Pro includes up to 10 workspaces — $20/mo.")
+        if can_pro:
+            cta = (f"<form method='post' action='/billing/checkout/pro'>"
+                   f"<input type='hidden' name='org' value='{_e(org['id'])}'>"
+                   f"<button class='btn' type='submit'>Upgrade to Pro →</button></form>"
+                   f"<a class='btn ghost' href='/pricing'>Compare plans</a>")
+        else:
+            cta = "<a class='btn' href='/pricing'>See plans →</a>"
+        upsell = (f"<div class='upsell'><div class='u-txt'>"
+                  f"<div class='u-h'>{_e(head)}</div><div class='u-s'>{_e(sub)}</div></div>"
+                  f"{cta}</div>")
 
     # org selector
     opts = "".join(
@@ -266,7 +303,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
           <button class="btn" type="submit">Top up →</button>
           <button class="btn ghost" type="submit" formaction="/billing/checkout/pro" {pro_disabled}>Upgrade to Pro · $20/mo</button>
           <button class="btn ghost" type="submit" formaction="/billing/portal">Manage billing</button>
-          <span class="muted" style="margin-left:auto">Stripe: {_e(sb)}</span>
+          <a class="muted" href="/pricing" style="margin-left:auto">Compare plans · Stripe: {_e(sb)}</a>
         </form>"""
     else:
         billing = f"""
@@ -313,6 +350,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
     <div style="display:flex;gap:8px;align-items:center">{orgsel}{userchip}{badges}</div>
   </div>
   {banner}
+  {upsell}
   {cards}
   <div class="grid cols">
     <div class="panel"><h2>Spend by workspace <span class="hint">budget caps</span></h2>
@@ -335,6 +373,59 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
 </div>
 <script>{POLLER}</script>
 </body></html>"""
+
+
+def pricing_page(*, stripe_status: dict, org_id: str | None = None,
+                 user=None, signed_in: bool = False) -> str:
+    """Public plans page — the comparison surface the upgrade nudges point to."""
+    from .. import pricing
+    can_pro = stripe_status.get("available") and stripe_status.get("has_pro_price")
+
+    cards = []
+    for key in ("free", "pro", "enterprise"):
+        t = pricing.TIERS[key]
+        price = ("$0" if key == "free" else
+                 ("Custom" if key == "enterprise" else f"${t.price_usd_month:,.0f}"))
+        per = "" if key == "enterprise" else "<span class='muted' style='font-size:13px'>/mo</span>"
+        feats = "".join(f"<li>{_e(f)}</li>" for f in t.features)
+        if key == "pro":
+            if not signed_in:
+                cta = "<a class='btn' href='/auth/login'>Sign in to upgrade →</a>"
+            elif can_pro and org_id:
+                cta = (f"<form method='post' action='/billing/checkout/pro' style='margin:0'>"
+                       f"<input type='hidden' name='org' value='{_e(org_id)}'>"
+                       f"<button class='btn' type='submit'>Upgrade to Pro →</button></form>")
+            else:
+                cta = "<a class='btn ghost' href='/'>Open dashboard</a>"
+            featured = " style='border-color:var(--amber-dim);box-shadow:0 0 0 1px var(--amber-dim)'"
+        elif key == "free":
+            cta = ("<a class='btn ghost' href='/'>Open dashboard</a>" if signed_in
+                   else "<a class='btn ghost' href='/auth/login'>Start free →</a>")
+            featured = ""
+        else:
+            cta = "<a class='btn ghost' href='mailto:tcconnally@gmail.com?subject=Plutus%20Enterprise'>Contact sales</a>"
+            featured = ""
+        cards.append(
+            f"<div class='card'{featured}>"
+            f"<div class='l'>{_e(t.name)}</div>"
+            f"<div class='v amber'>{price}{per}</div>"
+            f"<div class='s' style='min-height:34px'>{_e(t.blurb)}</div>"
+            f"<ul style='list-style:none;padding:0;margin:12px 0 16px;font-size:13px;color:var(--dim)'>"
+            f"{feats}</ul>{cta}</div>")
+    grid = "".join(cards)
+
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Plutus — Pricing</title>{FAVICON}
+<style>{CSS}
+.card ul li{{padding:3px 0;border-top:1px solid var(--line)}}
+.card ul li:first-child{{border-top:none}}</style></head><body><div class="wrap" style="max-width:980px">
+<div class="top"><div class="brand"><div class="logo">◆</div>
+  <div><h1>Plutus</h1><div class="tag">Plans &amp; pricing</div></div></div>
+  <a class="pill" href="/">← Dashboard</a></div>
+<div class="grid cards" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">{grid}</div>
+<div class="foot">All plans are self-hostable. Stripe handles billing; cancel anytime from the customer portal.<br>
+  Perseus Computing LLC · <a href="https://perseus.observer/plutus/">perseus.observer/plutus</a></div>
+</div></body></html>"""
 
 
 def login_page(login_href: str) -> str:

@@ -149,7 +149,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
 # ---------------------------------------------------------- organizations ----
 def create_org(conn, name: str, tier: str = "free",
-               owner_email: Optional[str] = None) -> sqlite3.Row:
+               owner_email: Optional[str] = None,
+               owner_name: Optional[str] = None) -> sqlite3.Row:
     oid = new_id("org")
     slug = slugify(name)
     # ensure slug uniqueness
@@ -164,7 +165,7 @@ def create_org(conn, name: str, tier: str = "free",
     if owner_email:
         conn.execute(
             "INSERT INTO users(id,org_id,email,name,role,created_at) VALUES(?,?,?,?,?,?)",
-            (new_id("usr"), oid, owner_email, None, "owner", time.time()),
+            (new_id("usr"), oid, owner_email, owner_name, "owner", time.time()),
         )
     conn.commit()
     return get_org(conn, oid)
