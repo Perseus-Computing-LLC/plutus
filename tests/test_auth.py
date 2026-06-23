@@ -95,6 +95,44 @@ class TestSessionsAndAllowlist(unittest.TestCase):
         self.assertEqual([o["id"] for o in mine], [self.org["id"]])
         self.assertFalse(db.email_in_org(self.conn, "owner@example.com", other["id"]))
 
+    # --- self-serve open signup -------------------------------------------
+    def test_signup_off_denies_stranger(self):
+        cfg = _auth_cfg(allow_signup=False)
+        self.assertIsNone(
+            authmod._authorize_email(self.conn, cfg, "fresh@stranger.com"))
+
+    def test_signup_on_provisions_own_org(self):
+        before = {o["id"] for o in db.list_orgs(self.conn)}
+        cfg = _auth_cfg(allow_signup=True)
+        uid = authmod._authorize_email(self.conn, cfg, "fresh@stranger.com",
+                                       name="Fresh Dev")
+        self.assertIsNotNone(uid)
+        user = db.get_user(self.conn, uid)
+        self.assertEqual(user["role"], "owner")
+        self.assertEqual(user["name"], "Fresh Dev")
+        # a brand-new org was created for them (not Acme)
+        new_orgs = [o for o in db.list_orgs(self.conn) if o["id"] not in before]
+        self.assertEqual(len(new_orgs), 1)
+        self.assertEqual(new_orgs[0]["id"], user["org_id"])
+        self.assertEqual(new_orgs[0]["tier"], "free")
+        self.assertNotEqual(new_orgs[0]["id"], self.org["id"])
+
+    def test_signup_allowlist_takes_precedence_over_open(self):
+        # an allow-listed email joins the existing org as a member, even with
+        # open signup on — it does NOT spin up a separate org.
+        cfg = _auth_cfg(allow_signup=True, allowed_emails=["teammate@example.com"],
+                        provision_org_id=self.org["id"])
+        n_before = len(db.list_orgs(self.conn))
+        uid = authmod._authorize_email(self.conn, cfg, "teammate@example.com")
+        self.assertTrue(db.email_in_org(self.conn, "teammate@example.com", self.org["id"]))
+        self.assertEqual(db.get_user(self.conn, uid)["role"], "member")
+        self.assertEqual(len(db.list_orgs(self.conn)), n_before)
+
+    def test_signup_existing_member_signs_in_as_self(self):
+        cfg = _auth_cfg(allow_signup=True)
+        uid = authmod._authorize_email(self.conn, cfg, "owner@example.com")
+        self.assertEqual(uid, self.user["id"])
+
 
 class TestOIDCCallback(unittest.TestCase):
     def setUp(self):
@@ -153,6 +191,21 @@ class TestOIDCCallback(unittest.TestCase):
         with self.assertRaises(authmod.AuthError):
             authmod.handle_callback(self.conn, self.cfg,
                                     {"code": "abc", "state": "never-issued"})
+
+    def test_callback_open_signup_creates_session_for_stranger(self):
+        cfg = _auth_cfg(allow_signup=True)
+        url = authmod.login_url(cfg)
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        state, nonce = qs["state"][0], qs["nonce"][0]
+        claims = self._good_claims(nonce, email="newbie@elsewhere.com", name="Newbie")
+        orig = authmod._exchange_code
+        authmod._exchange_code = lambda c, code: {"id_token": _jwt(claims)}
+        try:
+            token = authmod.handle_callback(self.conn, cfg,
+                                            {"code": "abc", "state": state})
+        finally:
+            authmod._exchange_code = orig
+        self.assertEqual(db.session_user(self.conn, token)["email"], "newbie@elsewhere.com")
 
 
 class TestServerEnforcement(unittest.TestCase):

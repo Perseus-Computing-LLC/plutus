@@ -14,7 +14,7 @@ live FinOps tools; the engine bridges to them via ``plutus_agent.bridge`` rather
 than importing them, so the two can ship and run independently.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __product__ = "Plutus"
 __tagline__ = "The billing layer for AI agents."
 __company__ = "Perseus Computing LLC"

@@ -58,6 +58,14 @@ class TestServer(unittest.TestCase):
         self.assertIn("Spend by workspace", body)
         self.assertIn("#0c0814", body)  # the brand bg color is present
 
+    def test_pricing_page_public(self):
+        status, body = self._get("/pricing")
+        self.assertEqual(status, 200)
+        for name in ("Free", "Pro", "Enterprise"):
+            self.assertIn(name, body)
+        self.assertIn("$20", body)
+        self.assertIn("Contact sales", body)
+
     def test_api_summary(self):
         status, body = self._get("/api/summary")
         self.assertEqual(status, 200)

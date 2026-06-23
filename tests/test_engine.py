@@ -107,6 +107,65 @@ class TestMetering(unittest.TestCase):
         self.assertFalse(r.estimated)
         self.assertEqual(r.cost_usd, 0.05)
 
+
+class TestFreeTierLimits(unittest.TestCase):
+    def setUp(self):
+        self.conn = fresh_conn()
+        self.org = db.create_org(self.conn, "Free Co", tier="free")["id"]
+
+    def tearDown(self):
+        drop_conn(self.conn)
+
+    def _meter(self, tokens, **kw):
+        return metering.record_usage(self.conn, self.org, provider="anthropic",
+                                     input_tokens=tokens, cost_usd=0.0, **kw)
+
+    def test_under_limit_not_flagged(self):
+        r = self._meter(5_000)
+        self.assertTrue(r.recorded)
+        self.assertFalse(r.over_free_limit)
+
+    def test_over_limit_still_records_but_flags(self):
+        self._meter(8_000)
+        r = self._meter(5_000)  # pushes past the 10K free cap
+        self.assertTrue(r.recorded)            # data is never silently dropped
+        self.assertTrue(r.over_free_limit)
+        self.assertEqual(metering.tracked_tokens_mtd(self.conn, self.org), 13_000)
+
+    def test_block_mode_drops_event_past_cap(self):
+        self._meter(10_000)  # exactly at cap
+        r = self._meter(1_000, block_over_limit=True)
+        self.assertFalse(r.recorded)
+        self.assertTrue(r.over_free_limit)
+        self.assertEqual(r.event_id, "")
+        self.assertEqual(metering.tracked_tokens_mtd(self.conn, self.org), 10_000)
+
+    def test_pro_tier_is_unlimited(self):
+        pro = db.create_org(self.conn, "Pro Co", tier="pro")["id"]
+        r = metering.record_usage(self.conn, pro, provider="anthropic",
+                                  input_tokens=5_000_000, cost_usd=0.0,
+                                  block_over_limit=True)
+        self.assertTrue(r.recorded)
+        self.assertFalse(r.over_free_limit)
+
+    def test_workspace_cap_folds_into_first(self):
+        self._meter(100, workspace="alpha")
+        self._meter(100, workspace="beta")   # 2nd workspace blocked on Free (cap 1)
+        ws = db.list_workspaces(self.conn, self.org)
+        self.assertEqual(len(ws), 1)
+        self.assertEqual(ws[0]["name"], "alpha")
+
+    def test_tier_status_reports_usage(self):
+        self._meter(7_600)
+        st = metering.tier_status(self.conn, self.org)
+        self.assertTrue(st["is_free"])
+        self.assertEqual(st["tracked_limit"], 10_000)
+        self.assertTrue(st["near_limit"])
+        self.assertFalse(st["over_limit"])
+        self._meter(3_000)
+        st = metering.tier_status(self.conn, self.org)
+        self.assertTrue(st["over_limit"])
+
     def test_credit_depletes(self):
         db.add_ledger(self.conn, self.org, 10.0, "topup")
         metering.record_usage(self.conn, self.org, provider="anthropic",

@@ -62,6 +62,7 @@ class Meter:
             cost_usd=cost_usd, source=source,
             pricing_overrides=self.cfg.get("pricing", {}).get("overrides"),
             alert_cfg=self.cfg.get("alerts", {}),
+            block_over_limit=bool(self.cfg.get("pricing", {}).get("block_over_free_limit")),
         )
 
     def topup(self, amount_usd: float, reason: str = "topup"):

@@ -2,6 +2,32 @@
 
 All notable changes to Plutus are documented here.
 
+## [0.4.0] — 2026-06-23
+
+The **self-serve signup funnel** — Plutus turns into a SaaS strangers can buy
+without an operator in the loop.
+
+### Added
+- **Open signup** (`auth.allow_signup` / `PLUTUS_ALLOW_SIGNUP`). When on, any
+  verified Google account that isn't already known gets its *own* new Free-tier
+  org as owner. Off by default; the allow-list still takes precedence so
+  inviting a teammate and onboarding a stranger stay distinct. See `docs/auth.md`.
+- **Free-tier enforcement** in the metering core:
+  - Workspace cap (Free = 1) — events tagged with a new workspace fold into the
+    org's first workspace instead of creating another; tracking never breaks.
+  - Token quota (Free = 10K/mo) — past the cap, events are flagged
+    `over_free_limit` (still recorded, so no billing data is dropped). Optional
+    hard stop via `pricing.block_over_free_limit`.
+  - `metering.tier_status()` — single source of truth for plan limits vs. usage.
+- **In-app upgrade nudge** on the dashboard once an org is near (≥75%) or over
+  its quota, wired straight to Stripe Checkout.
+- **Public `/pricing` page** comparing Free / Pro / Enterprise — the surface the
+  nudges point to (reachable without signing in).
+
+### Changed
+- `MeterResult` gains `recorded` and `over_free_limit` fields (additive).
+- `db.create_org()` accepts `owner_name`.
+
 ## [0.3.0] — 2026-06-22
 
 ### Added

@@ -12,6 +12,12 @@ later need to accept tokens from a less trusted path.
 Access is allow-listed: an email may sign in only if it is already a member of
 an org, or it matches ``auth.allowed_emails`` / ``auth.allowed_domain`` (in
 which case it is provisioned into ``auth.provision_org_id``, or the sole org).
+
+When ``auth.allow_signup`` is on, sign-in is **open**: any verified Google
+account that isn't already known gets its *own* brand-new Free-tier org (the
+self-serve SaaS path). The allow-list still takes precedence — an allow-listed
+address joins the existing org as a member rather than spinning up a new one —
+so "invite a teammate into my org" and "let strangers sign up" stay distinct.
 """
 from __future__ import annotations
 
@@ -139,12 +145,20 @@ def _only_org(conn) -> Optional[str]:
     return orgs[0]["id"] if len(orgs) == 1 else None
 
 
+def _org_name_for(email: str, name: Optional[str]) -> str:
+    """A friendly default org name for a self-serve signup."""
+    base = (name or "").strip() or email.split("@", 1)[0]
+    return f"{base}'s workspace"
+
+
 def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optional[str]:
     """Return the user_id to bind a session to, or None if not allowed.
 
     Existing members sign in as themselves. A newly-allowed email (via
     allowed_emails / allowed_domain) is provisioned as a 'member' of
-    provision_org_id, or of the sole org if there is exactly one.
+    provision_org_id, or of the sole org if there is exactly one. When
+    ``allow_signup`` is set, any other verified email gets its own new
+    Free-tier org as 'owner'.
     """
     auth = cfg.get("auth", {})
     members = db.users_by_email(conn, email)
@@ -155,13 +169,18 @@ def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optio
     dom = (auth.get("allowed_domain") or "").lower().lstrip("@")
     if dom and email.lower().endswith("@" + dom):
         allowed = True
-    if not allowed:
-        return None
+    if allowed:
+        org_id = auth.get("provision_org_id") or _only_org(conn)
+        if org_id and db.get_org(conn, org_id):
+            return db.ensure_user(conn, org_id, email, name=name, role="member")["id"]
+        # allow-listed but no org to join → fall through to self-serve if open
 
-    org_id = auth.get("provision_org_id") or _only_org(conn)
-    if not org_id or not db.get_org(conn, org_id):
-        return None
-    return db.ensure_user(conn, org_id, email, name=name, role="member")["id"]
+    if auth.get("allow_signup"):
+        org = db.create_org(conn, _org_name_for(email, name), tier="free",
+                            owner_email=email, owner_name=name)
+        return db.users_by_email(conn, email)[0]["id"]
+
+    return None
 
 
 def handle_callback(conn, cfg, q: dict) -> str:

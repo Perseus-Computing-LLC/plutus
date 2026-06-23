@@ -18,7 +18,7 @@ from ..billing import StripeClient, BillingError, handle_webhook_event
 from . import api, views, auth as authmod
 
 # Paths reachable without a session when auth is enabled.
-_PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe",
+_PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe", "/pricing",
                  "/auth/login", "/auth/callback", "/auth/logout"}
 
 
@@ -186,6 +186,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._auth_callback(conn, q)
             if path == "/auth/logout":
                 return self._auth_logout(conn)
+            if path == "/pricing":
+                return self._pricing(conn)
             if path == "/api/orgs":
                 return self._json(200, api.orgs_json(conn, self._scoped_orgs(conn)))
             if path == "/api/summary":
@@ -258,6 +260,18 @@ class Handler(BaseHTTPRequestHandler):
         )
         return self._send(200, page)
 
+    def _pricing(self, conn):
+        signed_in = (not self.ctx.auth_on) or (self._user is not None)
+        org_id = None
+        if signed_in:
+            try:
+                org_id = self._authz_org(conn, None)
+            except PermissionError:
+                org_id = None
+        return self._send(200, views.pricing_page(
+            stripe_status=self.ctx.stripe.status(),
+            org_id=org_id, user=self._user, signed_in=signed_in))
+
     # ---- billing -----------------------------------------------------------
     def _checkout_credit(self, conn):
         f = self._form()
@@ -317,7 +331,8 @@ def serve(host=None, port=None, db_path=None, demo=False, cfg=None,
     url = f"http://{host}:{port}/"
     stripe_mode = ctx.stripe.status()["mode"]
     if ctx.auth_on:
-        auth_mode = f"Google OIDC ({cfg['auth'].get('base_url') or 'base_url unset!'})"
+        signup = " · open signup" if cfg.get("auth", {}).get("allow_signup") else " · allow-list"
+        auth_mode = f"Google OIDC ({cfg['auth'].get('base_url') or 'base_url unset!'}){signup}"
     elif cfg.get("auth", {}).get("enabled"):
         auth_mode = "enabled but NOT configured → open (set Google client id/secret)"
     else:

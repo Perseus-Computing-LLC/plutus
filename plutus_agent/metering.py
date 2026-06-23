@@ -39,14 +39,22 @@ class MeterResult:
     estimated: bool
     balance_after: float
     alerts: list  # list of dicts {kind, message}
+    recorded: bool = True        # False when a hard free-tier cap dropped the event
+    over_free_limit: bool = False  # org is on a limited tier and past its monthly quota
 
 
 def _resolve_workspace(conn, org_id: str, workspace: Optional[str]) -> Optional[str]:
-    """Accept a workspace id, slug, or name; create-by-name if not found."""
+    """Accept a workspace id, slug, or name; create-by-name if not found.
+
+    Honors the org tier's workspace cap: once an org is at its limit (Free = 1),
+    a usage event tagged with a *new* workspace folds into the org's earliest
+    existing workspace instead of creating another. Tracking never breaks; the
+    cap just stops the workspace count from growing.
+    """
     if not workspace:
         return None
     ws = db.get_workspace(conn, workspace)
-    if ws:
+    if ws and ws["org_id"] == org_id:
         return ws["id"]
     row = conn.execute(
         "SELECT * FROM workspaces WHERE org_id=? AND (slug=? OR name=?)",
@@ -54,6 +62,12 @@ def _resolve_workspace(conn, org_id: str, workspace: Optional[str]) -> Optional[
     ).fetchone()
     if row:
         return row["id"]
+
+    existing = db.list_workspaces(conn, org_id)
+    org = db.get_org(conn, org_id)
+    cap = pricing.tier(org["tier"]).workspaces if org else None
+    if cap is not None and len(existing) >= cap:
+        return existing[0]["id"] if existing else None
     return db.create_workspace(conn, org_id, workspace)["id"]
 
 
@@ -65,9 +79,31 @@ def record_usage(conn, org_id: str, provider: str,
                  cost_usd: Optional[float] = None, source: str = "api",
                  pricing_overrides: Optional[dict] = None,
                  ts: Optional[float] = None,
-                 alert_cfg: Optional[dict] = None) -> MeterResult:
-    """Meter one LLM/agent call. Returns a :class:`MeterResult`."""
+                 alert_cfg: Optional[dict] = None,
+                 block_over_limit: bool = False) -> MeterResult:
+    """Meter one LLM/agent call. Returns a :class:`MeterResult`.
+
+    Free-tier quota: an org on a limited tier is flagged ``over_free_limit``
+    once its month-to-date tracked tokens reach the tier cap. With
+    ``block_over_limit`` the event past the cap is *not* recorded (``recorded``
+    is False) — otherwise it is still recorded so no billing data is lost.
+    """
     ts = ts if ts is not None else time.time()
+
+    org = db.get_org(conn, org_id)
+    limit = pricing.tier(org["tier"]).tracked_tokens_month if org else None
+    event_tokens = (int(input_tokens) + int(output_tokens)
+                    + int(cache_read_tokens) + int(reasoning_tokens))
+    tracked_before = tracked_tokens_mtd(conn, org_id, ts) if limit is not None else 0
+    if limit is not None and block_over_limit and tracked_before >= limit:
+        return MeterResult(
+            event_id="", org_id=org_id, workspace_id=None,
+            provider=provider, model=model, task_type=task_type,
+            cost_usd=0.0, estimated=cost_usd is None,
+            balance_after=db.get_balance(conn, org_id), alerts=[],
+            recorded=False, over_free_limit=True,
+        )
+
     workspace_id = _resolve_workspace(conn, org_id, workspace)
 
     estimated = cost_usd is None
@@ -103,11 +139,13 @@ def record_usage(conn, org_id: str, provider: str,
     alerts = _check_thresholds(conn, org_id, workspace_id, balance_after,
                                cost_usd, ts, alert_cfg or {})
 
+    over = limit is not None and (tracked_before + event_tokens) >= limit
     return MeterResult(
         event_id=eid, org_id=org_id, workspace_id=workspace_id,
         provider=provider, model=model, task_type=task_type,
         cost_usd=cost_usd, estimated=estimated,
         balance_after=balance_after, alerts=alerts,
+        recorded=True, over_free_limit=over,
     )
 
 
@@ -277,6 +315,34 @@ def tracked_tokens_mtd(conn, org_id: str, now: Optional[float] = None) -> int:
     return int(row["t"])
 
 
+def tier_status(conn, org_id: str, now: Optional[float] = None) -> dict:
+    """Plan limits vs. current usage — the single source of truth for the
+    free-tier meter and the in-app upgrade nudge.
+
+    ``near`` trips at 75% of the token quota; ``over`` once it's reached. Both
+    are False on unlimited tiers (Pro / Enterprise).
+    """
+    org = db.get_org(conn, org_id)
+    t = pricing.tier(org["tier"]) if org else pricing.tier("free")
+    tokens = tracked_tokens_mtd(conn, org_id, now)
+    limit = t.tracked_tokens_month
+    pct = (tokens / limit * 100.0) if limit else None
+    ws_used = len(db.list_workspaces(conn, org_id))
+    return {
+        "tier": t.key,
+        "tier_name": t.name,
+        "is_free": t.key == "free",
+        "tracked_tokens": tokens,
+        "tracked_limit": limit,
+        "tracked_pct": pct,
+        "near_limit": bool(limit and pct is not None and pct >= 75.0),
+        "over_limit": bool(limit and tokens >= limit),
+        "workspaces_used": ws_used,
+        "workspaces_limit": t.workspaces,
+        "workspaces_over": bool(t.workspaces is not None and ws_used >= t.workspaces),
+    }
+
+
 def recent_events(conn, org_id: str, limit: int = 25) -> list[dict]:
     rows = conn.execute(
         "SELECT ue.*, w.name AS workspace_name FROM usage_events ue "
@@ -302,6 +368,7 @@ def org_summary(conn, org_id: str, now: Optional[float] = None) -> dict:
         "tracked_tokens_mtd": tracked,
         "tracked_limit": limit,
         "tracked_pct": (tracked / limit * 100.0) if limit else None,
+        "tier_status": tier_status(conn, org_id, now),
         "by_provider": spend_by(conn, org_id, "provider", now=now),
         "by_workspace": spend_by(conn, org_id, "workspace", now=now),
         "by_task_type": cost_per_task(conn, org_id, now=now),
