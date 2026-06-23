@@ -11,6 +11,8 @@ pip install plutus-agent          # PyPI; stdlib + PyYAML, Stripe optional
 plutus demo                       # zero-setup tour with a month of sample data
 #   → open http://localhost:8420
 ```
+
+```text
   ____  _       _
  |  _ \| |_   _| |_ _   _ ___
  | |_) | | | | | __| | | / __|   god of wealth
@@ -47,7 +49,7 @@ Plutus is an **LLM FinOps tool** — it tracks your spend across every LLM provi
 
 ```bash
 # Install
-pip install plutus
+pip install plutus-agent
 
 # Monitor your providers
 plutus
@@ -65,6 +67,8 @@ plutus-route --apply
 # Backtest a routing policy before deploying
 plutus-route --backtest cost-cap
 ```
+
+Meter agent spend and run the billing dashboard:
 
 ```bash
 plutus init --org "Acme Agents" --tier pro --workspace ci --budget 100
@@ -90,7 +94,7 @@ print(plutus.balance())           # remaining prepaid credit
 
 Plutus reads your session history from a SQLite state database (Hermes Agent `state.db` by default, configurable) and fuses it with live balance APIs:
 
-| | |
+| Source | What it provides |
 |---|---|
 | **Live balance API** | DeepSeek, OpenAI — real-time dollar balances via REST |
 | **Spend ledger** | All providers — per-session cost rows (actual or estimated), token counts |
