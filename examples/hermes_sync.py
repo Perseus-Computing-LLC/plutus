@@ -93,7 +93,10 @@ def post_events(remote: str, api_key: str, events: list[dict], timeout: float = 
         remote.rstrip("/") + "/v1/usage",
         data=json.dumps(events).encode(),
         headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {api_key}"},
+                 "Authorization": f"Bearer {api_key}",
+                 # Real UA — Cloudflare (error 1010) blocks the default
+                 # "Python-urllib" signature when posting through the public URL.
+                 "User-Agent": "plutus-agent-hermes-sync"},
         method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())

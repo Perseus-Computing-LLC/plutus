@@ -31,7 +31,12 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-from . import config as cfgmod, db, metering
+from . import __version__, config as cfgmod, db, metering
+
+# A real User-Agent — some CDNs/WAFs (e.g. Cloudflare, error 1010) hard-block the
+# default "Python-urllib/x.y" signature, which would break ingest from behind a
+# proxy. Always send our own.
+_USER_AGENT = f"plutus-agent/{__version__}"
 
 
 class PlutusError(RuntimeError):
@@ -126,7 +131,8 @@ class Meter:
         req = urllib.request.Request(
             self.remote + "/v1/usage", data=json.dumps(event).encode(),
             headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"},
+                     "Authorization": f"Bearer {self.api_key}",
+                     "User-Agent": _USER_AGENT},
             method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
