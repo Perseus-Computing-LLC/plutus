@@ -65,6 +65,24 @@ Send a **JSON array** of up to 1000 such objects to batch.
 Batches return `{"results": [...], "recorded": N, "blocked": M}` plus the quota
 fields.
 
+### From the Python SDK
+
+The bundled `Meter` can post to `/v1/usage` for you — same call as local mode:
+
+```python
+from plutus_agent import Meter
+
+plutus = Meter(remote="https://plutus.perseus.observer", api_key="plutus_sk_…")
+plutus.track(provider="anthropic", model="claude-opus-4-8",
+             input_tokens=1200, output_tokens=800, task_type="code_review")
+```
+
+Set `PLUTUS_REMOTE_URL` + `PLUTUS_API_KEY` instead and remote mode is
+auto-detected — the provider adapters (`track_anthropic` / `track_openai`) and
+the Claude Code hook then report to your hosted instance with no code change.
+Over-quota events come back as `recorded=False` rather than raising, so they
+never break an agent. `balance()` / `summary()` / `topup()` are local-only.
+
 ### Status codes
 
 | Code | Meaning |

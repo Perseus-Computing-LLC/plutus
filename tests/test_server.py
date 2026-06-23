@@ -11,7 +11,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from plutus_agent import db, demo
+from plutus_agent import Meter, db, demo
+from plutus_agent.client import PlutusAuthError, PlutusError
 from plutus_agent.config import DEFAULT_CONFIG
 from plutus_agent.server import app
 
@@ -135,6 +136,35 @@ class TestServer(unittest.TestCase):
         self.assertEqual(len(body["results"]), 2)
         self.assertEqual(body["recorded"], 2)
 
+    # ---- SDK remote mode (Meter → /v1/usage) --------------------------------
+    def _remote_meter(self, **kw):
+        return Meter(remote=f"http://127.0.0.1:{self.port}", api_key=self.key, **kw)
+
+    def test_remote_meter_records(self):
+        m = self._remote_meter()
+        self.assertTrue(m.is_remote)
+        r = m.track(provider="anthropic", model="claude-opus-4-8",
+                    input_tokens=1000, output_tokens=500, workspace="prod")
+        self.assertTrue(r.recorded)
+        self.assertTrue(r.event_id.startswith("evt_"))
+        self.assertGreater(r.cost_usd, 0)
+        m.close()
+
+    def test_remote_meter_bad_key_raises(self):
+        m = Meter(remote=f"http://127.0.0.1:{self.port}", api_key="plutus_sk_bogus")
+        with self.assertRaises(PlutusAuthError):
+            m.track(provider="anthropic", input_tokens=10)
+
+    def test_remote_meter_no_key_errors(self):
+        with self.assertRaises(ValueError):
+            Meter(remote=f"http://127.0.0.1:{self.port}")
+
+    def test_remote_balance_is_local_only(self):
+        m = self._remote_meter()
+        with self.assertRaises(PlutusError):
+            m.balance()
+        m.close()
+
 
 class TestIngestQuota(unittest.TestCase):
     """Free org past its cap with hard-blocking on → 402."""
@@ -184,6 +214,14 @@ class TestIngestQuota(unittest.TestCase):
             body = json.loads(e.read().decode())
             self.assertFalse(body["recorded"])
             self.assertIn("upgrade_url", body)
+
+    def test_remote_meter_402_does_not_raise(self):
+        # An over-quota event should report recorded=False, not crash the agent.
+        m = Meter(remote=f"http://127.0.0.1:{self.port}", api_key=self.key)
+        r = m.track(provider="anthropic", input_tokens=500)
+        self.assertFalse(r.recorded)
+        self.assertTrue(r.over_free_limit)
+        m.close()
 
 
 if __name__ == "__main__":

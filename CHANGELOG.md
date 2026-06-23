@@ -18,6 +18,12 @@ feed usage into a hosted instance over HTTP, with no SDK or local DB.
 - **Dashboard key management** — an API-keys panel (list, create, revoke) with a
   ready-to-paste `curl` snippet; a one-time "key created" page.
 - **`plutus keys create|list|revoke`** CLI for self-hosted/local key management.
+- **SDK remote mode** — `Meter(remote="https://…", api_key="plutus_sk_…")` (or env
+  `PLUTUS_REMOTE_URL` + `PLUTUS_API_KEY`) sends each `track()` to `/v1/usage`
+  instead of a local DB. Auto-detected from env, so the bundled adapters and the
+  Claude Code hook report to a hosted instance with no code change. A 402 over
+  quota returns a non-recorded result rather than raising (won't break an agent);
+  `balance()`/`summary()`/`topup()` stay local-only.
 
 ### Changed
 - Schema version 3 — adds the `api_keys` table (additive; auto-applied on start).
