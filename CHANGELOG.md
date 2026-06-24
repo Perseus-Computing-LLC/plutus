@@ -2,6 +2,53 @@
 
 All notable changes to Plutus are documented here.
 
+## [0.7.0] — 2026-06-24
+
+Security hardening — the second of the two 1.0 launch-gate milestones. Closes
+the public-surface findings so open signup + live money can be exposed safely.
+(The roadmap's v0.7 exit also calls for an external security-review pass before
+public launch; that human gate is separate and not flipped here.)
+
+### Security
+- **Request body-size cap (#31)** — `/v1/usage` and `/webhook/stripe` reject
+  bodies over 1 MiB with `413`, closing a trivial memory-exhaustion DoS.
+- **CSRF protection (#32)** — cookie-authenticated state-changing POSTs are
+  same-origin checked (Origin/Referer vs `auth.base_url`); logout is now a POST
+  (`GET /auth/logout` returns `405`).
+- **Signup abuse controls (#33)** — self-serve signup is rate-limited
+  (5/hour globally) with a per-day org cap.
+- **Report XSS escaping (#34)** — attacker-controlled names (org, keys, periods)
+  are HTML-escaped in the dashboard and HTML/PDF reports.
+- **SMTP TLS (#35)** — implicit TLS on port 465 (`SMTP_SSL`) and STARTTLS on
+  other ports before any `LOGIN`; no credentials sent in the clear.
+- **OIDC JWKS verification (#36)** — Google ID tokens are verified against the
+  published JWKS RSA signature (cached 1h) in addition to `aud`/`iss`/`exp`/
+  `nonce` claims.
+
+### Polish (#37)
+- Strict integer parsing on token fields, `--db` flag wiring, config-file
+  backups on write, `email_verified` enforcement, and a YAML-load fallback.
+
+## [0.6.0] — 2026-06-24
+
+Money & concurrency correctness — the first 1.0 launch-gate milestone. Root
+cause for most findings: read-modify-write with no atomic transaction under the
+threaded, connection-per-request server.
+
+### Fixed
+- **Atomic `/v1/usage` (#27)** — validate all events, record them in a single
+  transaction, commit once; no partial batches, no double-count.
+- **Webhook idempotency (#26)** — insert the dedup row first and apply the
+  side-effect only if newly inserted, so retried Stripe events can't double-credit.
+- **Concurrency hardening (#30)** — `PRAGMA busy_timeout`, atomic `balance_after`,
+  and a fix for the free-tier quota race.
+- **Trustworthy credit (#29)** — credit prepaid balance from Stripe's
+  `amount_total`, never client-supplied metadata.
+- **Prepaid hard-stop (#28)** — stop debiting past zero; opt-in `402` when a
+  prepaid org is exhausted.
+- **Integer micro-dollars (#38)** — all money stored as integer micro-dollars
+  (schema migration) to eliminate float drift before the 1.0 schema freeze.
+
 ## [0.5.1] — 2026-06-23
 
 ### Fixed
