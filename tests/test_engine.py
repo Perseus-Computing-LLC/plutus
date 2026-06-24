@@ -8,8 +8,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from plutus_agent import db, metering, pricing, demo, reports
+from plutus_agent import db, metering, pricing, demo, reports, config as cfgmod
 from plutus_agent.billing import handle_webhook_event
+from plutus_agent.utils import strict_int
+from plutus_agent.server import auth as authmod
 
 
 _PATHS = {}  # id(conn) -> file path, since sqlite3.Connection forbids attrs
@@ -397,6 +399,179 @@ class TestClaudeHook(unittest.TestCase):
         finally:
             os.environ.pop("PLUTUS_DB", None)
             os.environ.pop("PLUTUS_ORG", None)
+
+
+class TestPolishIssue37(unittest.TestCase):
+    """Tests for the polish punch-list fixes (issue #37)."""
+
+    def test_strict_int_accepts_integers(self):
+        """strict_int accepts int and integer-valued strings."""
+        self.assertEqual(strict_int(5), 5)
+        self.assertEqual(strict_int('5'), 5)
+        self.assertEqual(strict_int(0), 0)
+        self.assertEqual(strict_int('0'), 0)
+        self.assertEqual(strict_int(-10), -10)
+        self.assertEqual(strict_int('-10'), -10)
+
+    def test_strict_int_rejects_floats(self):
+        """strict_int rejects float values and float-bearing strings."""
+        with self.assertRaises(ValueError):
+            strict_int(1.9)
+        with self.assertRaises(ValueError):
+            strict_int('1.9')
+        with self.assertRaises(ValueError):
+            strict_int(1.0)
+        with self.assertRaises(ValueError):
+            strict_int('1.0')
+
+    def test_db_wiring_honors_env(self):
+        """db_path() honors PLUTUS_DB environment variable."""
+        orig = os.environ.get('PLUTUS_DB')
+        try:
+            test_path = '/tmp/test_plutus_custom.db'
+            os.environ['PLUTUS_DB'] = test_path
+            self.assertEqual(str(cfgmod.db_path()), test_path)
+        finally:
+            if orig is None:
+                os.environ.pop('PLUTUS_DB', None)
+            else:
+                os.environ['PLUTUS_DB'] = orig
+
+    def test_config_save_creates_backup(self):
+        """config.save() creates a timestamped backup when file exists."""
+        import tempfile
+        import shutil
+        from pathlib import Path
+        
+        home = tempfile.mkdtemp()
+        orig_home = os.environ.get('PLUTUS_HOME')
+        try:
+            os.environ['PLUTUS_HOME'] = home
+            cfg_path = cfgmod.config_path()
+            
+            # First save: no backup should be created
+            initial_cfg = {'test': 'value1'}
+            cfgmod.save(initial_cfg)
+            self.assertTrue(cfg_path.exists())
+            backups = list(cfg_path.parent.glob('config.yaml.bak-*'))
+            self.assertEqual(len(backups), 0, "No backup on first save")
+            
+            # Second save: backup should be created
+            import time
+            time.sleep(1.1)  # Ensure different timestamp
+            updated_cfg = {'test': 'value2'}
+            cfgmod.save(updated_cfg)
+            backups = list(cfg_path.parent.glob('config.yaml.bak-*'))
+            self.assertGreaterEqual(len(backups), 1, "At least one backup after second save")
+            
+            # Third save: another backup
+            time.sleep(1.1)
+            cfgmod.save({'test': 'value3'})
+            backups = list(cfg_path.parent.glob('config.yaml.bak-*'))
+            self.assertGreaterEqual(len(backups), 2, "At least two backups after third save")
+        finally:
+            if orig_home is None:
+                os.environ.pop('PLUTUS_HOME', None)
+            else:
+                os.environ['PLUTUS_HOME'] = orig_home
+            shutil.rmtree(home, ignore_errors=True)
+
+    def test_email_verified_requires_truthy(self):
+        """email_verified must be explicitly True or 'true', missing/False rejected."""
+        cfg = {
+            'auth': {
+                'google_client_id': 'test-client-id',
+                'google_client_secret': 'test-secret',
+                'base_url': 'http://localhost:8420'
+            }
+        }
+        
+        # Missing email_verified should raise
+        claims_missing = {
+            'aud': 'test-client-id',
+            'iss': 'https://accounts.google.com',
+            'exp': time.time() + 3600,
+            'nonce': 'test-nonce',
+            'email': 'test@example.com'
+            # email_verified missing
+        }
+        with self.assertRaises(authmod.AuthError) as ctx:
+            authmod._claims_from_id_token.__wrapped__ = authmod._claims_from_id_token
+            # We need to mock just the claims extraction part
+            # Since _claims_from_id_token expects a JWT, let's test directly
+            import base64
+            import json
+            
+            def make_fake_token(claims):
+                # Create a fake JWT (we won't verify signature)
+                header = base64.urlsafe_b64encode(json.dumps({'alg': 'RS256'}).encode()).decode().rstrip('=')
+                payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')
+                return f"{header}.{payload}.fake_signature"
+            
+            fake_token = make_fake_token(claims_missing)
+            authmod._claims_from_id_token(fake_token, cfg, 'test-nonce')
+        self.assertIn('not verified', str(ctx.exception))
+        
+        # False should raise
+        claims_false = claims_missing.copy()
+        claims_false['email_verified'] = False
+        with self.assertRaises(authmod.AuthError) as ctx:
+            fake_token = make_fake_token(claims_false)
+            authmod._claims_from_id_token(fake_token, cfg, 'test-nonce')
+        self.assertIn('not verified', str(ctx.exception))
+        
+        # True should pass
+        claims_true = claims_missing.copy()
+        claims_true['email_verified'] = True
+        fake_token = make_fake_token(claims_true)
+        result = authmod._claims_from_id_token(fake_token, cfg, 'test-nonce')
+        self.assertEqual(result['email'], 'test@example.com')
+        
+        # 'true' string should pass
+        claims_str = claims_missing.copy()
+        claims_str['email_verified'] = 'true'
+        fake_token = make_fake_token(claims_str)
+        result = authmod._claims_from_id_token(fake_token, cfg, 'test-nonce')
+        self.assertEqual(result['email'], 'test@example.com')
+
+    def test_minimal_yaml_read_roundtrip(self):
+        """_minimal_yaml_read can parse simple YAML config."""
+        import tempfile
+        from pathlib import Path
+        
+        fd, path_str = tempfile.mkstemp(suffix='.yaml')
+        os.close(fd)
+        path = Path(path_str)
+        
+        try:
+            # Write a simple YAML config
+            yaml_content = """server:
+  host: 127.0.0.1
+  port: 8420
+billing:
+  currency: usd
+  stripe_price_pro: price_123
+alerts:
+  enabled: false
+  low_balance_usd: 10.0
+"""
+            path.write_text(yaml_content, encoding='utf-8')
+            
+            # Read it back with the minimal reader
+            result = cfgmod._minimal_yaml_read(path)
+            
+            # Verify structure
+            self.assertIn('server', result)
+            self.assertIn('billing', result)
+            self.assertIn('alerts', result)
+            self.assertEqual(result['server']['host'], '127.0.0.1')
+            self.assertEqual(result['server']['port'], 8420)
+            self.assertEqual(result['billing']['currency'], 'usd')
+            self.assertEqual(result['billing']['stripe_price_pro'], 'price_123')
+            self.assertEqual(result['alerts']['enabled'], False)
+            self.assertEqual(result['alerts']['low_balance_usd'], 10.0)
+        finally:
+            path.unlink()
 
 
 if __name__ == "__main__":

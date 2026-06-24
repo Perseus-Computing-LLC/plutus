@@ -88,7 +88,7 @@ CREATE INDEX IF NOT EXISTS ix_ledger_org_ts ON credit_ledger(org_id, ts);
 CREATE TABLE IF NOT EXISTS alerts_log (
     id           TEXT PRIMARY KEY,
     org_id       TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    workspace_id TEXT,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
     kind         TEXT NOT NULL,            -- low_balance|budget_warn|budget_cap
     message      TEXT NOT NULL,
     delivered    INTEGER NOT NULL DEFAULT 0,
