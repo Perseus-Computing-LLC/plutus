@@ -141,11 +141,11 @@ def record_usage(conn, org_id: str, provider: str,
     eid = db.new_id("evt")
     conn.execute(
         "INSERT INTO usage_events(id,org_id,workspace_id,provider,model,task_type,"
-        "input_tokens,output_tokens,cache_read_tokens,reasoning_tokens,cost_usd,"
+        "input_tokens,output_tokens,cache_read_tokens,reasoning_tokens,cost_micros,"
         "estimated,source,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (eid, org_id, workspace_id, provider, model, task_type,
          int(input_tokens), int(output_tokens), int(cache_read_tokens),
-         int(reasoning_tokens), cost_usd, int(estimated), source, ts),
+         int(reasoning_tokens), db.usd_to_micros(cost_usd), int(estimated), source, ts),
     )
 
     # Deplete prepaid credit (only when there's credit to deplete; orgs on the
@@ -245,10 +245,10 @@ def workspace_mtd_spend(conn, workspace_id: str, now: Optional[float] = None) ->
     now = now if now is not None else time.time()
     floor = _month_floor(now)
     row = conn.execute(
-        "SELECT COALESCE(SUM(cost_usd),0) s FROM usage_events WHERE workspace_id=? AND ts>=?",
+        "SELECT COALESCE(SUM(cost_micros),0) s FROM usage_events WHERE workspace_id=? AND ts>=?",
         (workspace_id, floor),
     ).fetchone()
-    return float(row["s"])
+    return db.micros_to_usd(int(row["s"]))
 
 
 def org_spend_windows(conn, org_id: str, now: Optional[float] = None) -> dict:
@@ -258,12 +258,12 @@ def org_spend_windows(conn, org_id: str, now: Optional[float] = None) -> dict:
     out = {}
     for name, floor in windows.items():
         row = conn.execute(
-            "SELECT COALESCE(SUM(cost_usd),0) cost, COALESCE(SUM(input_tokens+output_tokens"
+            "SELECT COALESCE(SUM(cost_micros),0) cost, COALESCE(SUM(input_tokens+output_tokens"
             "+cache_read_tokens+reasoning_tokens),0) tok, COUNT(*) n "
             "FROM usage_events WHERE org_id=? AND ts>=?",
             (org_id, floor),
         ).fetchone()
-        out[name] = {"cost": float(row["cost"]), "tokens": int(row["tok"]),
+        out[name] = {"cost": db.micros_to_usd(int(row["cost"])), "tokens": int(row["tok"]),
                      "events": int(row["n"])}
     return out
 
@@ -280,13 +280,13 @@ def spend_by(conn, org_id: str, dimension: str, since: float = 0,
     }[dimension]
     join = "LEFT JOIN workspaces w ON w.id = ue.workspace_id" if dimension == "workspace" else ""
     rows = conn.execute(
-        f"SELECT {col} AS k, COALESCE(SUM(ue.cost_usd),0) cost, "
+        f"SELECT {col} AS k, COALESCE(SUM(ue.cost_micros),0) cost, "
         f"COALESCE(SUM(ue.input_tokens+ue.output_tokens+ue.cache_read_tokens+ue.reasoning_tokens),0) tok, "
         f"COUNT(*) n FROM usage_events ue {join} "
         f"WHERE ue.org_id=? AND ue.ts>=? GROUP BY k ORDER BY cost DESC",
         (org_id, since),
     ).fetchall()
-    return [{"key": r["k"], "cost": float(r["cost"]), "tokens": int(r["tok"]),
+    return [{"key": r["k"], "cost": db.micros_to_usd(int(r["cost"])), "tokens": int(r["tok"]),
              "events": int(r["n"])} for r in rows]
 
 
@@ -299,8 +299,8 @@ def provider_health(conn, org_id: str, now: Optional[float] = None) -> list[dict
     now = now if now is not None else time.time()
     rows = conn.execute(
         "SELECT provider, MAX(ts) last_ts, "
-        "COALESCE(SUM(CASE WHEN ts>=? THEN cost_usd ELSE 0 END),0) c7, "
-        "COALESCE(SUM(cost_usd),0) all_cost, COUNT(*) n "
+        "COALESCE(SUM(CASE WHEN ts>=? THEN cost_micros ELSE 0 END),0) c7, "
+        "COALESCE(SUM(cost_micros),0) all_cost, COUNT(*) n "
         "FROM usage_events WHERE org_id=? GROUP BY provider ORDER BY all_cost DESC",
         (now - 7 * DAY, org_id),
     ).fetchall()
@@ -311,8 +311,8 @@ def provider_health(conn, org_id: str, now: Optional[float] = None) -> list[dict
         out.append({
             "provider": r["provider"],
             "last_ts": r["last_ts"],
-            "burn_per_day": round(float(r["c7"]) / 7.0, 4),
-            "all_cost": float(r["all_cost"]),
+            "burn_per_day": round(db.micros_to_usd(int(r["c7"])) / 7.0, 4),
+            "all_cost": db.micros_to_usd(int(r["all_cost"])),
             "events": int(r["n"]),
             "status": status,
         })
@@ -374,7 +374,12 @@ def recent_events(conn, org_id: str, limit: int = 25) -> list[dict]:
         "WHERE ue.org_id=? ORDER BY ue.ts DESC LIMIT ?",
         (org_id, limit),
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["cost_usd"] = db.micros_to_usd(int(d.get("cost_micros", 0) or 0))
+        out.append(d)
+    return out
 
 
 def org_summary(conn, org_id: str, now: Optional[float] = None) -> dict:

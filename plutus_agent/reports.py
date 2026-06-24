@@ -38,18 +38,18 @@ def build_report(conn, org_id: str, year: int, month: int) -> dict:
         rows = conn.execute(
             _SPEND_SQL[dimension], (org_id, start, end)
         ).fetchall()
-        return [{"key": r["k"], "cost": float(r["cost"]),
+        return [{"key": r["k"], "cost": db.micros_to_usd(int(r["cost"])),
                  "tokens": int(r["tok"]), "events": int(r["n"])} for r in rows]
 
     total = conn.execute(
-        "SELECT COALESCE(SUM(cost_usd),0) cost, "
+        "SELECT COALESCE(SUM(cost_micros),0) cost, "
         "COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+reasoning_tokens),0) tok, "
         "COUNT(*) n FROM usage_events WHERE org_id=? AND ts>=? AND ts<?",
         (org_id, start, end),
     ).fetchone()
 
     credits = conn.execute(
-        "SELECT kind, COALESCE(SUM(delta_usd),0) s, COUNT(*) n FROM credit_ledger "
+        "SELECT kind, COALESCE(SUM(delta_micros),0) s, COUNT(*) n FROM credit_ledger "
         "WHERE org_id=? AND ts>=? AND ts<? GROUP BY kind",
         (org_id, start, end),
     ).fetchall()
@@ -62,32 +62,32 @@ def build_report(conn, org_id: str, year: int, month: int) -> dict:
         "org": dict(org),
         "period": {"year": year, "month": month, "label": f"{MONTHS[month]} {year}"},
         "generated_at": time.time(),
-        "total": {"cost": float(total["cost"]), "tokens": int(total["tok"]),
+        "total": {"cost": db.micros_to_usd(int(total["cost"])), "tokens": int(total["tok"]),
                   "events": int(total["n"])},
         "by_workspace": agg("workspace"),
         "by_provider": agg("provider"),
         "by_task_type": by_task,
         "by_model": agg("model")[:8],
-        "credits": [{"kind": c["kind"], "total": float(c["s"]), "count": int(c["n"])}
+        "credits": [{"kind": c["kind"], "total": db.micros_to_usd(int(c["s"])), "count": int(c["n"])}
                     for c in credits],
         "balance_now": db.get_balance(conn, org_id),
     }
 
 
 _SPEND_SQL = {
-    "provider": "SELECT provider k, COALESCE(SUM(cost_usd),0) cost, "
+    "provider": "SELECT provider k, COALESCE(SUM(cost_micros),0) cost, "
                 "COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+reasoning_tokens),0) tok, "
                 "COUNT(*) n FROM usage_events WHERE org_id=? AND ts>=? AND ts<? "
                 "GROUP BY provider ORDER BY cost DESC",
-    "task_type": "SELECT task_type k, COALESCE(SUM(cost_usd),0) cost, "
+    "task_type": "SELECT task_type k, COALESCE(SUM(cost_micros),0) cost, "
                  "COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+reasoning_tokens),0) tok, "
                  "COUNT(*) n FROM usage_events WHERE org_id=? AND ts>=? AND ts<? "
                  "GROUP BY task_type ORDER BY cost DESC",
-    "model": "SELECT COALESCE(model,'-') k, COALESCE(SUM(cost_usd),0) cost, "
+    "model": "SELECT COALESCE(model,'-') k, COALESCE(SUM(cost_micros),0) cost, "
              "COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+reasoning_tokens),0) tok, "
              "COUNT(*) n FROM usage_events WHERE org_id=? AND ts>=? AND ts<? "
              "GROUP BY model ORDER BY cost DESC",
-    "workspace": "SELECT COALESCE(w.name,'(none)') k, COALESCE(SUM(ue.cost_usd),0) cost, "
+    "workspace": "SELECT COALESCE(w.name,'(none)') k, COALESCE(SUM(ue.cost_micros),0) cost, "
                  "COALESCE(SUM(ue.input_tokens+ue.output_tokens+ue.cache_read_tokens+ue.reasoning_tokens),0) tok, "
                  "COUNT(*) n FROM usage_events ue LEFT JOIN workspaces w ON w.id=ue.workspace_id "
                  "WHERE ue.org_id=? AND ue.ts>=? AND ue.ts<? GROUP BY k ORDER BY cost DESC",
