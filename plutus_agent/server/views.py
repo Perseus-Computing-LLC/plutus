@@ -204,7 +204,10 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
         ident = (user["name"] or user["email"]) if hasattr(user, "keys") else str(user)
         userchip = (
             "<span style='font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center'>"
-            f"{_e(ident)} · <a href='/auth/logout' style='color:var(--muted)'>Sign out</a></span>")
+            f"{_e(ident)} · "
+            "<form method='post' action='/auth/logout' style='display:inline;margin:0'>"
+            "<button type='submit' style='background:none;border:none;color:var(--muted);cursor:pointer;padding:0;font:inherit'>Sign out</button>"
+            "</form></span>")
 
     # tracked-tokens meter (free tier limit)
     tracked, limit = summary["tracked_tokens_mtd"], summary["tracked_limit"]

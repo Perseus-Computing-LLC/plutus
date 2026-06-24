@@ -250,3 +250,120 @@ class TestIngestQuota(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- Security hardening tests (issues #31-#36) --------------------------------
+class TestSecurityHardening(unittest.TestCase):
+    """Tests for security fixes #31-#36."""
+    
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = db.connect(cls.dbpath)
+        cls.org_id = demo.seed(conn, events=10)
+        _, cls.key = db.create_api_key(conn, cls.org_id, name="test")
+        conn.close()
+
+        ctx = app._Ctx(dict(DEFAULT_CONFIG), cls.dbpath, demo=True)
+        cls.httpd = app._Server(("127.0.0.1", 0), app.Handler, ctx)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(cls.dbpath + ext)
+            except OSError:
+                pass
+
+    def _post(self, path, payload, token=None):
+        """Helper to POST JSON."""
+        url = f"http://127.0.0.1:{self.port}{path}"
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                     headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+
+    # Fix #31: Body size limit
+    def test_oversized_body_returns_413(self):
+        """Oversized request body should return 413."""
+        # Manually send a request with a huge Content-Length header
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", self.port))
+            huge_size = 2 * 1024 * 1024  # 2 MiB
+            request = (
+                f"POST /v1/usage HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                f"Authorization: Bearer {self.key}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {huge_size}\r\n"
+                f"\r\n"
+                # Send at least 1 byte to trigger the read, but server should reject before reading it all
+                f"{{"
+            )
+            sock.sendall(request.encode())
+            response = sock.recv(8192).decode()
+            sock.close()
+            
+            self.assertIn("413", response)
+            self.assertIn("too large", response.lower())
+        finally:
+            try:
+                sock.close()
+            except:
+                pass
+
+    def test_normal_body_size_works(self):
+        """Normal-sized body should still work."""
+        status, body = self._post("/v1/usage", {
+            "provider": "anthropic",
+            "input_tokens": 100
+        }, token=self.key)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["recorded"])
+
+    # Fix #34: HTML escaping in reports
+    def test_report_escapes_xss_in_workspace_name(self):
+        """Reports should escape workspace names containing HTML/script tags."""
+        from plutus_agent import reports, db as db_mod
+        conn = db_mod.connect(self.dbpath)
+        
+        # Create workspace with XSS payload
+        xss_name = "<script>alert('xss')</script>"
+        ws_id = db_mod.create_workspace(conn, self.org_id, xss_name)["id"]
+        
+        # Record usage to that workspace
+        from plutus_agent import metering
+        metering.record_usage(conn, self.org_id, provider="test", workspace=xss_name,
+                            input_tokens=100, cost_usd=0.01)
+        
+        # Build and render report
+        import datetime as dt
+        now = dt.datetime.now()
+        report = reports.build_report(conn, self.org_id, now.year, now.month)
+        html = reports.render_html(report)
+        
+        conn.close()
+        
+        # The literal script tag should NOT appear in HTML
+        self.assertNotIn("<script>", html)
+        self.assertNotIn("</script>", html)
+        # But the escaped version should
+        self.assertIn("&lt;script&gt;", html)
+
+
+if __name__ == "__main__":
+    unittest.main()

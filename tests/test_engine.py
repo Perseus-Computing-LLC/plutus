@@ -399,5 +399,56 @@ class TestClaudeHook(unittest.TestCase):
             os.environ.pop("PLUTUS_ORG", None)
 
 
+# ---- Security hardening test (issue #35) ---------------------------------------
+class TestSMTPTLSSecurity(unittest.TestCase):
+    """Test SMTP TLS enforcement (Fix #35)."""
+    
+    def test_no_login_without_tls(self):
+        """SMTP should not login with credentials when TLS is unavailable."""
+        from plutus_agent import alerts
+        import unittest.mock as mock
+        
+        conn = fresh_conn()
+        try:
+            org = db.create_org(conn, "Test Org")
+            
+            # Create a pending alert
+            conn.execute(
+                "INSERT INTO alerts_log (id, org_id, kind, message, ts, delivered) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("alert_1", org["id"], "low_balance", "Test alert", time.time(), 0)
+            )
+            conn.commit()
+            
+            # Mock SMTP to simulate a server without STARTTLS support
+            with mock.patch("plutus_agent.alerts.smtplib.SMTP") as mock_smtp:
+                mock_server = mock.MagicMock()
+                mock_server.esmtp_features = {}  # No STARTTLS
+                mock_smtp.return_value.__enter__.return_value = mock_server
+                
+                cfg = {
+                    "alerts": {
+                        "enabled": True,
+                        "smtp_host": "mail.example.com",
+                        "smtp_port": 25,
+                        "smtp_user": "testuser",
+                        "smtp_password": "testpass",
+                        "to_addrs": ["test@example.com"]
+                    }
+                }
+                
+                result = alerts.send_pending(conn, cfg, org["id"])
+                
+                # Should return an error about TLS
+                self.assertIn("error", result)
+                self.assertIn("TLS", result["error"])
+                self.assertEqual(result["sent"], 0)
+                
+                # Verify login was NOT called
+                mock_server.login.assert_not_called()
+        finally:
+            drop_conn(conn)
+
+
 if __name__ == "__main__":
     unittest.main()
