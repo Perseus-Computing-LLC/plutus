@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Integration smoke test: boot the HTTP server on an ephemeral port."""
+import io
 import json
 import os
 import sys
 import tempfile
 import threading
+import types
 import unittest
 import urllib.error
 import urllib.request
@@ -471,6 +473,75 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertNotIn("</script>", html)
         # But the escaped version should
         self.assertIn("&lt;script&gt;", html)
+
+
+class TestSameOrigin(unittest.TestCase):
+    """Unit coverage for the same-origin check behind CSRF protection (Fix #32)."""
+
+    def _check(self, base_url, headers):
+        fake = types.SimpleNamespace()
+        fake.ctx = types.SimpleNamespace(cfg={"auth": {"base_url": base_url}})
+        fake.headers = headers
+        return app.Handler._same_origin(fake)
+
+    def test_matching_origin_allowed(self):
+        self.assertTrue(self._check("https://app.example.com",
+                                    {"Origin": "https://app.example.com"}))
+
+    def test_mismatched_origin_blocked(self):
+        self.assertFalse(self._check("https://app.example.com",
+                                     {"Origin": "https://evil.example.com"}))
+
+    def test_referer_fallback_allowed(self):
+        self.assertTrue(self._check("https://app.example.com",
+                                    {"Referer": "https://app.example.com/dashboard"}))
+
+    def test_referer_fallback_blocked(self):
+        self.assertFalse(self._check("https://app.example.com",
+                                     {"Referer": "https://evil.example.com/x"}))
+
+    def test_no_headers_blocked(self):
+        # Absent Origin AND Referer is rejected for safety.
+        self.assertFalse(self._check("https://app.example.com", {}))
+
+    def test_unconfigured_base_url_cannot_verify(self):
+        # With no base_url the server can't judge origin, so it allows through.
+        self.assertTrue(self._check("", {"Origin": "https://anywhere.com"}))
+
+    def test_origin_takes_precedence_over_referer(self):
+        # A mismatched Origin blocks even when Referer would have matched.
+        self.assertFalse(self._check(
+            "https://app.example.com",
+            {"Origin": "https://evil.example.com",
+             "Referer": "https://app.example.com/x"}))
+
+    def test_base_url_trailing_slash_normalized(self):
+        self.assertTrue(self._check("https://app.example.com/",
+                                    {"Origin": "https://app.example.com"}))
+
+
+class TestBodyCap(unittest.TestCase):
+    """Unit coverage for the request-body size limit (Fix #31)."""
+
+    def _read(self, declared_len, payload, max_bytes):
+        fake = types.SimpleNamespace()
+        fake.headers = ({"Content-Length": str(declared_len)}
+                        if declared_len is not None else {})
+        fake.rfile = io.BytesIO(payload)
+        return app.Handler._body(fake, max_bytes=max_bytes)
+
+    def test_at_limit_allowed(self):
+        self.assertEqual(self._read(10, b"x" * 10, max_bytes=10), b"x" * 10)
+
+    def test_over_limit_raises(self):
+        with self.assertRaises(app._BodyTooLarge):
+            self._read(11, b"x" * 11, max_bytes=10)
+
+    def test_missing_content_length_is_empty(self):
+        self.assertEqual(self._read(None, b"", max_bytes=10), b"")
+
+    def test_default_limit_is_one_mib(self):
+        self.assertEqual(app.MAX_BODY_BYTES, 1 * 1024 * 1024)
 
 
 if __name__ == "__main__":

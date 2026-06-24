@@ -277,6 +277,175 @@ if __name__ == "__main__":
     unittest.main()
 
 
+# A fixed RSA-2048 test keypair, generated once offline. The tests below sign
+# tokens with the private exponent in pure Python (no crypto deps, no network)
+# and patch _get_public_key to return its public half — so RS256 verification is
+# exercised deterministically instead of fetching Google's live JWKS.
+_RSA_N = 24082071316944105535264363308125315081250696206379611006902791111414462803792342111092086488077527810965707259282176039699553715360063115605638203558350292866326474214097340832177899311999630061207584261420827254645947602202512245817930496082738620746378204581118753661611277201038248541169972056179138472964709176368076222696056548081502168410035626513049142471362210716033646277565923118257369951859210616352517546435402478729200315896344136226664836868186780117004177629252579457368833344326120719796058132245097292213156637867134965004036885984902882614855313331086730291643959970615985956228741256116766962875983
+_RSA_E = 65537
+_RSA_D = 5981107997404507465973389712168023461213018327833756936682434821863881640254023720070279258532400326214028976903672420131980954650285294302653051548274527625390176858612118600567002870156064185212564643226678139430735143827918455607953593920056403709184095029782717447396840853278294268956827977454382057836665026945284258000196374479498734116942844985015516975701280188053120785912950111729410279298376217763849433774214947138601296886781903609166930783353977143208142704433270702111739128147392561960129054716546251593262583189855898776171535583215414011419089715420530570962946095746158781756129468041066764401161
+
+
+def _b64url_str(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _sign_rs256(header: dict, claims: dict) -> str:
+    """Produce a JWT signed with the fixed test key (EMSA-PKCS1-v1_5, SHA-256)."""
+    import hashlib
+
+    h_b64 = _b64url_str(json.dumps(header).encode())
+    p_b64 = _b64url_str(json.dumps(claims).encode())
+    digest = hashlib.sha256(f"{h_b64}.{p_b64}".encode("ascii")).digest()
+    digestinfo = bytes.fromhex("3031300d060960864801650304020105000420") + digest
+    k = (_RSA_N.bit_length() + 7) // 8
+    em = b"\x00\x01" + b"\xff" * (k - len(digestinfo) - 3) + b"\x00" + digestinfo
+    sig = pow(int.from_bytes(em, "big"), _RSA_D, _RSA_N)
+    return f"{h_b64}.{p_b64}.{_b64url_str(sig.to_bytes(k, 'big'))}"
+
+
+class TestRS256Verification(unittest.TestCase):
+    """Deterministic RS256 signature verification, no network (Fix #36)."""
+
+    def setUp(self):
+        self._orig_get_key = authmod._get_public_key
+        authmod._get_public_key = lambda kid: (_RSA_N, _RSA_E)
+
+    def tearDown(self):
+        authmod._get_public_key = self._orig_get_key
+
+    def test_valid_signature_accepted(self):
+        tok = _sign_rs256({"kid": "test", "alg": "RS256"}, {"sub": "x"})
+        authmod._verify_rs256_signature(tok)  # must not raise
+
+    def test_tampered_payload_rejected(self):
+        tok = _sign_rs256({"kid": "test", "alg": "RS256"}, {"email": "real@example.com"})
+        h, _p, s = tok.split(".")
+        forged = f"{h}.{_b64url_str(json.dumps({'email': 'attacker@evil.com'}).encode())}.{s}"
+        with self.assertRaises(authmod.AuthError):
+            authmod._verify_rs256_signature(forged)
+
+    def test_alg_none_downgrade_rejected(self):
+        # An attacker who flips alg to "none" must not bypass verification.
+        tok = _sign_rs256({"kid": "test", "alg": "none"}, {"sub": "x"})
+        with self.assertRaises(authmod.AuthError) as cm:
+            authmod._verify_rs256_signature(tok)
+        self.assertIn("algorithm", str(cm.exception).lower())
+
+    def test_alg_hs256_rejected(self):
+        tok = _sign_rs256({"kid": "test", "alg": "HS256"}, {"sub": "x"})
+        with self.assertRaises(authmod.AuthError):
+            authmod._verify_rs256_signature(tok)
+
+    def test_missing_kid_rejected(self):
+        tok = _sign_rs256({"alg": "RS256"}, {"sub": "x"})
+        with self.assertRaises(authmod.AuthError) as cm:
+            authmod._verify_rs256_signature(tok)
+        self.assertIn("kid", str(cm.exception).lower())
+
+    def test_malformed_token_rejected(self):
+        with self.assertRaises(authmod.AuthError):
+            authmod._verify_rs256_signature("only.two")
+
+    def test_wrong_key_rejected(self):
+        tok = _sign_rs256({"kid": "test", "alg": "RS256"}, {"sub": "x"})
+        authmod._get_public_key = lambda kid: (_RSA_N - 2, _RSA_E)  # different modulus
+        with self.assertRaises(authmod.AuthError):
+            authmod._verify_rs256_signature(tok)
+
+    def test_claims_path_runs_verification(self):
+        # A non-"hdr" header forces _claims_from_id_token through the real verifier.
+        cfg = _auth_cfg()
+        good = {"aud": cfg["auth"]["google_client_id"],
+                "iss": "https://accounts.google.com", "exp": time.time() + 3600,
+                "nonce": "n", "email": "owner@example.com", "email_verified": True}
+        tok = _sign_rs256({"kid": "test", "alg": "RS256"}, good)
+        self.assertEqual(
+            authmod._claims_from_id_token(tok, cfg, "n")["email"], "owner@example.com")
+        # Same path rejects a token whose payload was swapped after signing.
+        h, _p, s = tok.split(".")
+        bad = f"{h}.{_b64url_str(json.dumps({**good, 'email': 'evil@x.com'}).encode())}.{s}"
+        with self.assertRaises(authmod.AuthError):
+            authmod._claims_from_id_token(bad, cfg, "n")
+
+
+class TestCSRFEnforcement(unittest.TestCase):
+    """Cookie-authenticated state-changing POSTs must be same-origin (Fix #32)."""
+
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = db.connect(cls.dbpath)
+        cls.org_id = demo.seed(conn, events=10)
+        cls.user = db.ensure_user(conn, cls.org_id, "owner@example.com",
+                                  name="Owner", role="owner")
+        cls.token = db.create_session(conn, cls.user["id"], ttl_seconds=3600)
+        _, cls.api_key = db.create_api_key(conn, cls.org_id, name="csrf-test")
+        conn.close()
+
+        ctx = app._Ctx(_auth_cfg(), cls.dbpath, demo=True)
+        assert ctx.auth_on, "auth must be on for CSRF enforcement"
+        cls.httpd = app._Server(("127.0.0.1", 0), app.Handler, ctx)
+        cls.port = cls.httpd.server_address[1]
+        # base_url must include the bound ephemeral port so same-origin can match.
+        ctx.cfg["auth"]["base_url"] = f"http://127.0.0.1:{cls.port}"
+        cls.origin = f"http://127.0.0.1:{cls.port}"
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(cls.dbpath + ext)
+            except OSError:
+                pass
+
+    def _post(self, path, cookie=None, origin=None, bearer=None, data=b""):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        headers = {}
+        if cookie:
+            headers["Cookie"] = f"plutus_session={cookie}"
+        if origin:
+            headers["Origin"] = origin
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def test_cookie_post_without_origin_blocked(self):
+        status, body = self._post("/auth/logout", cookie=self.token)
+        self.assertEqual(status, 403)
+        self.assertIn("cross-origin", body)
+
+    def test_cookie_post_cross_origin_blocked(self):
+        status, body = self._post("/auth/logout", cookie=self.token,
+                                  origin="http://evil.example.com")
+        self.assertEqual(status, 403)
+        self.assertIn("cross-origin", body)
+
+    def test_cookie_post_same_origin_allowed(self):
+        # Same-origin cookie POST clears the CSRF gate (reaches the handler).
+        status, body = self._post("/keys/create", cookie=self.token,
+                                  origin=self.origin,
+                                  data=f"org={self.org_id}".encode())
+        self.assertNotIn("cross-origin", body)
+
+    def test_bearer_usage_exempt_from_csrf(self):
+        # Bearer-authenticated /v1/usage is exempt — cross-origin must NOT block it.
+        status, body = self._post("/v1/usage", bearer=self.api_key,
+                                  origin="http://evil.example.com", data=b"{}")
+        self.assertNotEqual(status, 403)
+        self.assertNotIn("cross-origin", body)
+
+
 # ---- Security hardening tests (issues #33, #36) --------------------------------
 class TestSignupRateLimit(unittest.TestCase):
     """Test signup rate limiting (Fix #33)."""
