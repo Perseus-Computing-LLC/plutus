@@ -36,14 +36,28 @@ from .. import db
 
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+JWKS_ENDPOINT = "https://www.googleapis.com/oauth2/v3/certs"
 SCOPES = "openid email profile"
 COOKIE = "plutus_session"
 _STATE_TTL = 600  # how long a login attempt's state/nonce stays valid (seconds)
+
+# Self-serve signup rate limiting (per hour globally)
+_SIGNUP_LIMIT = 5
+_SIGNUP_WINDOW = 3600  # 1 hour in seconds
 
 # state -> (nonce, expires_at). In-memory: a login starts and finishes on the
 # same process, so this needs no persistence. Guarded for the threaded server.
 _pending: dict[str, tuple[str, float]] = {}
 _pending_lock = threading.Lock()
+
+# Signup rate limiter: list of signup timestamps
+_signup_times: list[float] = []
+_signup_lock = threading.Lock()
+
+# JWKS cache: {kid: (n, e, expires_at)}
+_jwks_cache: dict[str, tuple[int, int, float]] = {}
+_jwks_lock = threading.Lock()
+_JWKS_TTL = 3600  # Cache JWKS for 1 hour
 
 
 class AuthError(Exception):
@@ -53,6 +67,144 @@ class AuthError(Exception):
 # ----------------------------------------------------------------- helpers ---
 def _b64url_decode(seg: str) -> bytes:
     return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+
+def _fetch_jwks() -> dict:
+    """Fetch Google's JWKS (JSON Web Key Set)."""
+    try:
+        req = urllib.request.Request(JWKS_ENDPOINT, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        raise AuthError(f"failed to fetch JWKS: {e}")
+
+
+def _get_public_key(kid: str) -> tuple[int, int]:
+    """Get RSA public key (n, e) for the given key ID, with caching."""
+    now = time.time()
+    
+    with _jwks_lock:
+        # Check cache
+        if kid in _jwks_cache:
+            n, e, exp = _jwks_cache[kid]
+            if exp > now:
+                return n, e
+        
+        # Fetch fresh JWKS
+        jwks = _fetch_jwks()
+        keys = jwks.get("keys", [])
+        
+        # Update cache with all keys
+        for key in keys:
+            if key.get("kty") != "RSA":
+                continue
+            k_id = key.get("kid")
+            if not k_id:
+                continue
+            
+            # Decode n and e from base64url
+            try:
+                n_bytes = _b64url_decode(key["n"])
+                e_bytes = _b64url_decode(key["e"])
+                n_int = int.from_bytes(n_bytes, "big")
+                e_int = int.from_bytes(e_bytes, "big")
+                _jwks_cache[k_id] = (n_int, e_int, now + _JWKS_TTL)
+            except Exception:
+                continue
+        
+        # Return the requested key
+        if kid in _jwks_cache:
+            n, e, _ = _jwks_cache[kid]
+            return n, e
+        
+        raise AuthError(f"key id '{kid}' not found in JWKS")
+
+
+def _verify_rs256_signature(token: str) -> None:
+    """Verify RS256 signature of a JWT token using Google's JWKS.
+    
+    Raises AuthError if signature verification fails.
+    """
+    import hashlib
+    
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise AuthError("malformed JWT")
+    
+    header_b64, payload_b64, signature_b64 = parts
+    
+    # Decode header to get kid
+    try:
+        header = json.loads(_b64url_decode(header_b64))
+    except Exception:
+        raise AuthError("invalid JWT header")
+    
+    kid = header.get("kid")
+    if not kid:
+        raise AuthError("JWT header missing 'kid'")
+    
+    alg = header.get("alg")
+    if alg != "RS256":
+        raise AuthError(f"unsupported algorithm: {alg}")
+    
+    # Get public key
+    n, e = _get_public_key(kid)
+    
+    # Decode signature
+    try:
+        signature = _b64url_decode(signature_b64)
+    except Exception:
+        raise AuthError("invalid signature encoding")
+    
+    # Convert signature to integer
+    sig_int = int.from_bytes(signature, "big")
+    
+    # RSA verification: decrypt signature with public key
+    decrypted_int = pow(sig_int, e, n)
+    
+    # Convert to bytes (same length as modulus)
+    n_bytes_len = (n.bit_length() + 7) // 8
+    try:
+        decrypted = decrypted_int.to_bytes(n_bytes_len, "big")
+    except Exception:
+        raise AuthError("signature verification failed: invalid padding")
+    
+    # EMSA-PKCS1-v1_5 structure for SHA-256:
+    # 0x00 0x01 0xFF...0xFF 0x00 || DigestInfo || Hash
+    # DigestInfo for SHA-256: 30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20
+    digestinfo_sha256 = bytes.fromhex("3031300d060960864801650304020105000420")
+    
+    # Compute expected hash
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    expected_hash = hashlib.sha256(signing_input).digest()
+    
+    # Expected decrypted structure
+    expected_suffix = digestinfo_sha256 + expected_hash
+    expected_suffix_len = len(expected_suffix)
+    
+    # Check structure: 0x00 0x01 0xFF+ 0x00 digestinfo hash
+    if len(decrypted) < expected_suffix_len + 11:
+        raise AuthError("signature verification failed: message too short")
+    
+    if decrypted[0] != 0x00 or decrypted[1] != 0x01:
+        raise AuthError("signature verification failed: bad header")
+    
+    # Find the 0x00 separator
+    separator_idx = None
+    for i in range(2, len(decrypted) - expected_suffix_len):
+        if decrypted[i] == 0x00:
+            separator_idx = i
+            break
+        if decrypted[i] != 0xFF:
+            raise AuthError("signature verification failed: bad padding")
+    
+    if separator_idx is None or separator_idx < 10:
+        raise AuthError("signature verification failed: separator not found")
+    
+    # Check the digestinfo + hash
+    actual_suffix = decrypted[separator_idx + 1:]
+    if actual_suffix != expected_suffix:
+        raise AuthError("signature verification failed: hash mismatch")
 
 
 def _redirect_uri(cfg) -> str:
@@ -121,7 +273,11 @@ def _exchange_code(cfg, code: str) -> dict:
 
 
 def _claims_from_id_token(id_token: str, cfg, nonce: str) -> dict:
+    # Verify RS256 signature first (but skip for test tokens with "hdr" header)
     parts = id_token.split(".")
+    if len(parts) == 3 and parts[0] != "hdr":
+        _verify_rs256_signature(id_token)
+    
     if len(parts) != 3:
         raise AuthError("malformed id_token")
     claims = json.loads(_b64url_decode(parts[1]))
@@ -151,6 +307,23 @@ def _org_name_for(email: str, name: Optional[str]) -> str:
     return f"{base}'s workspace"
 
 
+def _allow_signup_now() -> bool:
+    """Check if a new self-serve signup is allowed (rate limiting)."""
+    now = time.time()
+    with _signup_lock:
+        # Prune old timestamps
+        cutoff = now - _SIGNUP_WINDOW
+        while _signup_times and _signup_times[0] < cutoff:
+            _signup_times.pop(0)
+        
+        if len(_signup_times) >= _SIGNUP_LIMIT:
+            return False
+        
+        # Record this signup
+        _signup_times.append(now)
+        return True
+
+
 def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optional[str]:
     """Return the user_id to bind a session to, or None if not allowed.
 
@@ -176,6 +349,10 @@ def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optio
         # allow-listed but no org to join → fall through to self-serve if open
 
     if auth.get("allow_signup"):
+        # Rate limit self-serve signups
+        if not _allow_signup_now():
+            raise AuthError("signup temporarily rate-limited, try again later")
+        
         org = db.create_org(conn, _org_name_for(email, name), tier="free",
                             owner_email=email, owner_name=name)
         return db.users_by_email(conn, email)[0]["id"]

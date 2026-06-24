@@ -89,20 +89,48 @@ def send_pending(conn, cfg: dict, org_id: str,
     errors = []
     try:
         ctx = ssl.create_default_context()
-        with smtplib.SMTP(smtp_host, port, timeout=20) as server:
-            server.ehlo()
-            if port in (587,):
-                server.starttls(context=ctx)
+        
+        # Port 465: implicit TLS (SMTP_SSL)
+        if port == 465:
+            with smtplib.SMTP_SSL(smtp_host, port, context=ctx, timeout=20) as server:
+                if user:
+                    server.login(user, password)
+                for a in items:
+                    try:
+                        server.send_message(_build_message(a, from_addr, to_addrs, org_name))
+                        _mark_delivered(conn, a["id"])
+                        sent += 1
+                    except Exception as e:
+                        errors.append(f"{a['id']}: {e}")
+        else:
+            # Other ports: use STARTTLS if available
+            with smtplib.SMTP(smtp_host, port, timeout=20) as server:
                 server.ehlo()
-            if user:
-                server.login(user, password)
-            for a in items:
-                try:
-                    server.send_message(_build_message(a, from_addr, to_addrs, org_name))
-                    _mark_delivered(conn, a["id"])
-                    sent += 1
-                except Exception as e:  # one bad alert shouldn't sink the rest
-                    errors.append(f"{a['id']}: {e}")
+                tls_secured = False
+                
+                # Try STARTTLS if supported
+                if "starttls" in server.esmtp_features:
+                    try:
+                        server.starttls(context=ctx)
+                        server.ehlo()
+                        tls_secured = True
+                    except Exception:
+                        pass
+                
+                # Only login if TLS is secured OR if no credentials are required
+                if user and password:
+                    if not tls_secured:
+                        return {"sent": 0, "dry_run": False, "pending": len(items),
+                                "error": "SMTP credentials provided but TLS could not be established"}
+                    server.login(user, password)
+                
+                for a in items:
+                    try:
+                        server.send_message(_build_message(a, from_addr, to_addrs, org_name))
+                        _mark_delivered(conn, a["id"])
+                        sent += 1
+                    except Exception as e:
+                        errors.append(f"{a['id']}: {e}")
     except Exception as e:
         return {"sent": sent, "dry_run": False, "pending": len(items) - sent,
                 "error": str(e)}

@@ -23,6 +23,13 @@ _PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe", "/pricing",
                  "/v1/usage",  # authenticated by its own Bearer API key, not a session
                  "/auth/login", "/auth/callback", "/auth/logout"}
 
+# Max request body size (1 MiB) — protects /v1/usage and /webhook/stripe from DoS
+MAX_BODY_BYTES = 1 * 1024 * 1024
+
+
+class _BodyTooLarge(Exception):
+    """Raised when Content-Length exceeds MAX_BODY_BYTES."""
+
 
 class _Ctx:
     """Shared, read-mostly server context."""
@@ -85,8 +92,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", url)
         self.end_headers()
 
-    def _body(self) -> bytes:
+    def _body(self, max_bytes=MAX_BODY_BYTES) -> bytes:
         n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > max_bytes:
+            raise _BodyTooLarge(f"request body {n} bytes exceeds limit {max_bytes}")
         return self.rfile.read(n) if n else b""
 
     def _form(self) -> dict:
@@ -166,6 +175,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Set-Cookie", authmod.clear_cookie_header(self.ctx.cfg))
         self.end_headers()
 
+    def _same_origin(self) -> bool:
+        """Check if the request is same-origin by comparing Origin/Referer to base_url."""
+        base_url = (self.ctx.cfg.get("auth", {}).get("base_url") or "").rstrip("/")
+        if not base_url:
+            # If no base_url configured, can't verify origin
+            return True
+        
+        from urllib.parse import urlparse
+        base_host = urlparse(base_url).netloc.lower()
+        
+        # Check Origin header first (preferred for CORS)
+        origin = self.headers.get("Origin", "")
+        if origin:
+            origin_host = urlparse(origin).netloc.lower()
+            return origin_host == base_host
+        
+        # Fall back to Referer
+        referer = self.headers.get("Referer", "")
+        if referer:
+            referer_host = urlparse(referer).netloc.lower()
+            return referer_host == base_host
+        
+        # No origin/referer headers — reject for safety
+        return False
+
     # ---- routing -----------------------------------------------------------
     def do_HEAD(self):
         self.do_GET()
@@ -186,8 +220,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._auth_login()
             if path == "/auth/callback":
                 return self._auth_callback(conn, q)
+            # /auth/logout moved to POST for CSRF protection
             if path == "/auth/logout":
-                return self._auth_logout(conn)
+                return self._json(405, {"error": "use POST to logout"})
             if path == "/pricing":
                 return self._pricing(conn)
             if path == "/api/orgs":
@@ -224,6 +259,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not self._gate(conn, path):
                 return
+            
+            # CSRF protection: cookie-authenticated state-changing POSTs must be same-origin
+            # Exempt: /v1/usage (Bearer auth), /webhook/stripe (signature-verified)
+            needs_csrf_check = (
+                self.ctx.auth_on and 
+                path not in {"/v1/usage", "/webhook/stripe"} and
+                self._user is not None  # Cookie-authenticated
+            )
+            if needs_csrf_check and not self._same_origin():
+                return self._json(403, {"error": "cross-origin request blocked"})
+            
+            if path == "/auth/logout":
+                return self._auth_logout(conn)
             if path == "/v1/usage":
                 return self._ingest_usage(conn)
             if path == "/webhook/stripe":
@@ -239,6 +287,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/keys/revoke":
                 return self._keys_revoke(conn)
             return self._json(404, {"error": f"no route for {path}"})
+        except _BodyTooLarge:
+            return self._json(413, {"error": "request body too large"})
         except PermissionError:
             return self._json(403, {"error": "forbidden: not a member of that org"})
         except BillingError as e:
@@ -299,7 +349,11 @@ class Handler(BaseHTTPRequestHandler):
         if not org_id:
             return self._json(401, {"error": "invalid or missing API key"})
         try:
-            payload = json.loads(self._body() or b"{}")
+            body = self._body()
+        except _BodyTooLarge:
+            raise
+        try:
+            payload = json.loads(body or b"{}")
         except Exception:
             return self._json(400, {"error": "body must be JSON"})
         events = payload if isinstance(payload, list) else [payload]

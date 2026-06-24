@@ -275,3 +275,97 @@ class TestServerEnforcement(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- Security hardening tests (issues #33, #36) --------------------------------
+class TestSignupRateLimit(unittest.TestCase):
+    """Test signup rate limiting (Fix #33)."""
+    
+    def setUp(self):
+        fd, self.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.conn = db.connect(self.dbpath)
+        db.init_schema(self.conn)
+        # Clear rate limiter state
+        authmod._signup_times.clear()
+    
+    def tearDown(self):
+        self.conn.close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.dbpath + ext)
+            except OSError:
+                pass
+    
+    def test_signup_rate_limit_trips(self):
+        """After N signups, the rate limiter should block new signups."""
+        cfg = _auth_cfg(allow_signup=True)
+        
+        # Do 5 signups (the limit)
+        for i in range(5):
+            uid = authmod._authorize_email(self.conn, cfg, f"user{i}@example.com")
+            self.assertIsNotNone(uid)
+        
+        # The 6th should be rate-limited
+        with self.assertRaises(authmod.AuthError) as cm:
+            authmod._authorize_email(self.conn, cfg, "blocked@example.com")
+        self.assertIn("rate-limited", str(cm.exception))
+    
+    def test_existing_member_not_rate_limited(self):
+        """Existing members should bypass rate limiting."""
+        cfg = _auth_cfg(allow_signup=True)
+        
+        # Create existing member
+        org = db.create_org(self.conn, "Existing", owner_email="member@example.com")
+        
+        # Exhaust the rate limit
+        for i in range(5):
+            authmod._authorize_email(self.conn, cfg, f"new{i}@example.com")
+        
+        # Existing member should still work
+        uid = authmod._authorize_email(self.conn, cfg, "member@example.com")
+        self.assertIsNotNone(uid)
+
+
+class TestOIDCSignatureVerification(unittest.TestCase):
+    """Test OIDC id_token signature verification (Fix #36)."""
+    
+    def test_tampered_signature_rejected(self):
+        """A token with a tampered signature should raise AuthError."""
+        # Create a fake token with invalid signature
+        header = base64.urlsafe_b64encode(
+            json.dumps({"kid": "fake", "alg": "RS256"}).encode()
+        ).rstrip(b"=").decode()
+        
+        claims = {
+            "aud": "test.apps.googleusercontent.com",
+            "iss": "accounts.google.com",
+            "exp": time.time() + 3600,
+            "nonce": "test-nonce",
+            "email": "test@example.com",
+            "email_verified": True
+        }
+        payload = base64.urlsafe_b64encode(
+            json.dumps(claims).encode()
+        ).rstrip(b"=").decode()
+        
+        # Bogus signature
+        signature = base64.urlsafe_b64encode(b"bogus_signature").rstrip(b"=").decode()
+        fake_token = f"{header}.{payload}.{signature}"
+        
+        cfg = _auth_cfg()
+        
+        # Should raise AuthError during signature verification
+        with self.assertRaises(authmod.AuthError) as cm:
+            authmod._claims_from_id_token(fake_token, cfg, "test-nonce")
+        
+        # The error should be about signature verification or JWKS
+        error_msg = str(cm.exception).lower()
+        self.assertTrue(
+            "signature" in error_msg or "jwks" in error_msg or "key" in error_msg,
+            f"Expected signature/JWKS error, got: {cm.exception}"
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

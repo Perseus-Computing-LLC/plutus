@@ -103,28 +103,37 @@ def _rows(items, label):
         return f'<tr><td colspan="4" class="empty">No {label} this period.</td></tr>'
     out = []
     for r in items:
+        import html
+        key_escaped = html.escape(str(r["key"]))
         cpe = f'<td class="num">{_usd(r["cost_per_event"])}</td>' if "cost_per_event" in r else ""
         out.append(
-            f'<tr><td>{r["key"]}</td><td class="num">{_usd(r["cost"])}</td>'
+            f'<tr><td>{key_escaped}</td><td class="num">{_usd(r["cost"])}</td>'
             f'<td class="num">{r["tokens"]:,}</td><td class="num">{r["events"]:,}</td>{cpe}</tr>'
         )
     return "".join(out)
 
 
 def render_html(report: dict) -> str:
+    import html as html_module
     p = report["period"]
     org = report["org"]
     t = report["total"]
     gen = _dt.datetime.fromtimestamp(report["generated_at"]).strftime("%Y-%m-%d %H:%M")
     cpe_head = '<th class="num">$/task</th>'
+    
+    # Escape dynamic strings
+    org_name_escaped = html_module.escape(org['name'])
+    org_tier_escaped = html_module.escape(org['tier'].title())
+    period_label_escaped = html_module.escape(p['label'])
+    
     credit_rows = "".join(
-        f'<tr><td>{c["kind"].title()}</td><td class="num">{_usd(c["total"])}</td>'
+        f'<tr><td>{html_module.escape(c["kind"].title())}</td><td class="num">{_usd(c["total"])}</td>'
         f'<td class="num">{c["count"]}</td><td></td></tr>'
         for c in report["credits"]
     ) or '<tr><td colspan="4" class="empty">No credit movements.</td></tr>'
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>Plutus — {org['name']} — {p['label']} spend report</title>
+<title>Plutus — {org_name_escaped} — {period_label_escaped} spend report</title>
 <style>
   @page {{ margin: 1.5cm; }}
   body {{ font: 13px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; color:#1a1626; margin:0; padding:32px; }}
@@ -149,8 +158,8 @@ def render_html(report: dict) -> str:
 <div class="head">
   <div><div class="brand"><span class="amber">◆</span> Plutus</div>
        <div class="muted">The billing layer for AI agents · Perseus Computing LLC</div></div>
-  <div style="text-align:right"><h1>{org['name']}</h1>
-       <div class="muted">{p['label']} · {org['tier'].title()} plan</div></div>
+  <div style="text-align:right"><h1>{org_name_escaped}</h1>
+       <div class="muted">{period_label_escaped} · {org_tier_escaped} plan</div></div>
 </div>
 <div class="hero">
   <div class="stat"><div class="v">{_usd(t['cost'])}</div><div class="l">Total spend</div></div>
@@ -225,8 +234,15 @@ def _try_pdf(report: dict, out_path: Path) -> Optional[Path]:
                             topMargin=0.7 * inch, bottomMargin=0.7 * inch)
     story = []
     org, p, t = report["org"], report["period"], report["total"]
-    story.append(Paragraph(f"◆ Plutus — {org['name']}", h))
-    story.append(Paragraph(f"{p['label']} · {org['tier'].title()} plan · "
+    
+    # Escape dynamic strings for PDF (Paragraph auto-escapes but be explicit with str())
+    import html as html_module
+    org_name_escaped = html_module.escape(org['name'])
+    org_tier_escaped = html_module.escape(org['tier'].title())
+    period_label_escaped = html_module.escape(p['label'])
+    
+    story.append(Paragraph(f"◆ Plutus — {org_name_escaped}", h))
+    story.append(Paragraph(f"{period_label_escaped} · {org_tier_escaped} plan · "
                            f"The billing layer for AI agents", sub))
     story.append(Spacer(1, 16))
 
@@ -245,11 +261,13 @@ def _try_pdf(report: dict, out_path: Path) -> Optional[Path]:
     story.append(Spacer(1, 16))
 
     def section(title, items, cpe=False):
+        import html as html_module
         story.append(Paragraph(title, sec))
         head = ["Name", "Cost", "Tokens", "Calls"] + (["$/task"] if cpe else [])
         data = [head]
         for r in items or []:
-            row = [str(r["key"]), _usd(r["cost"]), f"{r['tokens']:,}", f"{r['events']:,}"]
+            key_escaped = html_module.escape(str(r["key"]))
+            row = [key_escaped, _usd(r["cost"]), f"{r['tokens']:,}", f"{r['events']:,}"]
             if cpe:
                 row.append(_usd(r.get("cost_per_event", 0)))
             data.append(row)
