@@ -259,11 +259,12 @@ def collect():
                 fetcher = lambda ak=api_key, ep=endpoint: _generic_balance(ak, ep)
         if fetcher and providers.get(name, {}).get("api_key"):
             bal = fetcher(providers[name]["api_key"])
-            entry["source"] = bal.get("source", "estimate")
             if bal.get("ok"):
                 entry["balance"] = bal["balance_usd"]
+                entry["source"] = bal.get("source", "live")
             else:
                 entry["balance_error"] = bal.get("error")
+                entry["source"] = bal.get("source", "estimate")
         # budget-based remaining for no-balance providers
         b = budgets.get(name)
         if b and isinstance(b, dict) and float(b.get("budget_usd") or 0) > 0:
@@ -416,7 +417,7 @@ def snapshot(data):
         rec[e["provider"]] = {
             "bal": e["balance"], "rem": e["remaining"],
             "all": round(e["spend"].get("all", 0), 4),
-            "src": e["source"],
+            "src": e.get("source", "estimate"),
         }
     with open(SNAPSHOT_FILE, "a", encoding='utf-8') as f:
         f.write(json.dumps(rec) + "\n")
