@@ -5,8 +5,13 @@ Usage is metered per (org, workspace, provider, model, task_type). Prepaid
 credit is an append-only ledger; the org balance is the sum of its deltas, so it
 is always auditable and can never silently drift.
 
-All money is stored in USD as REAL. All timestamps are Unix epoch seconds
-(matching ``plutus.py``'s ``state.db`` convention).
+All money is stored as **integer micro-dollars** (1 USD = 1_000_000 micros) in
+columns suffixed ``_micros``. Integers sum exactly in SQLite, so a large
+``SUM(delta_micros)`` never accumulates the sub-cent float drift that a REAL
+ledger would — we convert to float USD only once, at the read boundary, via the
+``micros_to_usd`` helper. The public Python API of this module still speaks
+float USD; the integer representation is an internal storage detail. All
+timestamps are Unix epoch seconds (matching ``plutus.py``'s ``state.db``).
 
 The connection uses WAL + a row factory returning ``sqlite3.Row`` so callers get
 dict-like rows. Nothing here imports Flask/Stripe — it's pure stdlib and works
@@ -21,7 +26,31 @@ import time
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# ---- money: integer micro-dollars ------------------------------------------
+# All money is stored as integer micro-dollars (1 USD == MICROS_PER_USD micros).
+# Convert at the boundary only: integers accumulate exactly in SQL, so we incur
+# a single rounding when crossing back to float USD for display / Stripe.
+MICROS_PER_USD = 1_000_000
+
+
+def usd_to_micros(usd) -> int:
+    """Convert a float/Decimal/str USD amount to integer micro-dollars.
+
+    Rounds to the nearest micro using banker-safe ``round`` on a scaled value.
+    ``None`` maps to ``None`` so nullable money columns round-trip cleanly.
+    """
+    if usd is None:
+        return None
+    return int(round(float(usd) * MICROS_PER_USD))
+
+
+def micros_to_usd(micros) -> float:
+    """Convert integer micro-dollars back to float USD. ``None`` -> ``None``."""
+    if micros is None:
+        return None
+    return micros / MICROS_PER_USD
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS organizations (
@@ -48,7 +77,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     org_id             TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name               TEXT NOT NULL,
     slug               TEXT NOT NULL,
-    monthly_budget_usd REAL,
+    monthly_budget_micros INTEGER,
     created_at         REAL NOT NULL,
     UNIQUE(org_id, slug)
 );
@@ -64,7 +93,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     output_tokens     INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     reasoning_tokens  INTEGER NOT NULL DEFAULT 0,
-    cost_usd          REAL NOT NULL DEFAULT 0,
+    cost_micros       INTEGER NOT NULL DEFAULT 0,
     estimated         INTEGER NOT NULL DEFAULT 1,
     source            TEXT NOT NULL DEFAULT 'api',
     ts                REAL NOT NULL
@@ -76,11 +105,11 @@ CREATE INDEX IF NOT EXISTS ix_usage_prov   ON usage_events(org_id, provider);
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id            TEXT PRIMARY KEY,
     org_id        TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    delta_usd     REAL NOT NULL,           -- +topup/grant/refund, -debit
+    delta_micros  INTEGER NOT NULL,          -- +topup/grant/refund, -debit
     kind          TEXT NOT NULL,           -- topup|grant|debit|refund|adjust
     reason        TEXT,
     stripe_ref    TEXT,
-    balance_after REAL NOT NULL,
+    balance_after_micros INTEGER NOT NULL,
     ts            REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_ledger_org_ts ON credit_ledger(org_id, ts);
@@ -158,12 +187,58 @@ def connect(path: Optional[str | Path] = None) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
+    _migrate_money_to_micros(conn)
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
+
+
+def _table_columns(conn, table: str) -> set:
+    try:
+        return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _migrate_money_to_micros(conn) -> None:
+    """Convert a pre-v4 database (REAL USD money columns) to integer micros.
+
+    Idempotent: detects the legacy column on each table and, if present, adds the
+    new ``*_micros`` column, back-fills it as ``round(usd * 1e6)``, and drops the
+    old column (via SQLite's column-drop, available 3.35+, with a table-rebuild
+    fallback for older SQLite). A fresh database has no legacy columns, so this
+    is a no-op and the canonical SCHEMA creates the integer columns directly.
+    """
+    plan = [
+        ("usage_events", "cost_usd", "cost_micros"),
+        ("credit_ledger", "delta_usd", "delta_micros"),
+        ("credit_ledger", "balance_after", "balance_after_micros"),
+        ("workspaces", "monthly_budget_usd", "monthly_budget_micros"),
+    ]
+    did_any = False
+    for table, old_col, new_col in plan:
+        cols = _table_columns(conn, table)
+        if not cols or old_col not in cols:
+            continue  # fresh DB or already migrated
+        did_any = True
+        if new_col not in cols:
+            coltype = "INTEGER NOT NULL DEFAULT 0" if old_col != "monthly_budget_usd" else "INTEGER"
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} {coltype}")
+        # Back-fill: round to nearest micro. NULL budgets stay NULL.
+        conn.execute(
+            f"UPDATE {table} SET {new_col} = CAST(ROUND({old_col} * 1000000) AS INTEGER) "
+            f"WHERE {old_col} IS NOT NULL"
+        )
+        # Drop the legacy column. SQLite >= 3.35 supports DROP COLUMN directly.
+        try:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {old_col}")
+        except sqlite3.OperationalError:
+            pass  # older SQLite: leave the now-unused REAL column in place
+    if did_any:
+        conn.commit()
 
 
 # ---------------------------------------------------------- organizations ----
@@ -384,63 +459,109 @@ def create_workspace(conn, org_id: str, name: str,
         n += 1
         slug = f"{base}-{n}"
     conn.execute(
-        "INSERT INTO workspaces(id,org_id,name,slug,monthly_budget_usd,created_at)"
+        "INSERT INTO workspaces(id,org_id,name,slug,monthly_budget_micros,created_at)"
         " VALUES(?,?,?,?,?,?)",
-        (wid, org_id, name, slug, monthly_budget_usd, time.time()),
+        (wid, org_id, name, slug, usd_to_micros(monthly_budget_usd), time.time()),
     )
     conn.commit()
-    return conn.execute("SELECT * FROM workspaces WHERE id=?", (wid,)).fetchone()
+    return get_workspace(conn, wid)
 
 
-def list_workspaces(conn, org_id: str) -> list[sqlite3.Row]:
-    return conn.execute(
+def _workspace_row(row: Optional[sqlite3.Row]):
+    """Expose ``monthly_budget_usd`` (float USD) alongside the stored micros."""
+    if row is None:
+        return None
+    d = dict(row)
+    d["monthly_budget_usd"] = micros_to_usd(d.get("monthly_budget_micros"))
+    return d
+
+
+def list_workspaces(conn, org_id: str) -> list[dict]:
+    rows = conn.execute(
         "SELECT * FROM workspaces WHERE org_id=? ORDER BY created_at", (org_id,)
     ).fetchall()
+    return [_workspace_row(r) for r in rows]
 
 
-def get_workspace(conn, workspace_id: str) -> Optional[sqlite3.Row]:
-    return conn.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+def get_workspace(conn, workspace_id: str):
+    row = conn.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+    return _workspace_row(row)
 
 
 # ----------------------------------------------------------------- credit ----
 def get_balance(conn, org_id: str) -> float:
-    """Authoritative balance = sum of all ledger deltas.
+    """Authoritative balance in float USD = sum of all ledger deltas.
 
-    Computed from the deltas rather than the latest row's ``balance_after`` so it
-    is correct regardless of insertion / timestamp order (live metering arrives
-    in order; demo seeding and historical back-fill do not). ``balance_after``
-    remains a best-effort audit column.
+    Computed from the integer micro-dollar deltas rather than the latest row's
+    ``balance_after_micros`` so it is correct regardless of insertion /
+    timestamp order (live metering arrives in order; demo seeding and historical
+    back-fill do not). Integers sum exactly, so there is no float drift; we
+    convert to USD once, here at the boundary.
     """
     row = conn.execute(
-        "SELECT COALESCE(SUM(delta_usd),0) bal FROM credit_ledger WHERE org_id=?",
+        "SELECT COALESCE(SUM(delta_micros),0) bal FROM credit_ledger WHERE org_id=?",
         (org_id,),
     ).fetchone()
-    return round(float(row["bal"]), 6)
+    return micros_to_usd(int(row["bal"]))
+
+
+def get_balance_micros(conn, org_id: str) -> int:
+    """Authoritative balance in integer micro-dollars (no float involved)."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(delta_micros),0) bal FROM credit_ledger WHERE org_id=?",
+        (org_id,),
+    ).fetchone()
+    return int(row["bal"])
 
 
 def add_ledger(conn, org_id: str, delta_usd: float, kind: str,
                reason: str = "", stripe_ref: Optional[str] = None,
                ts: Optional[float] = None, commit: bool = True) -> sqlite3.Row:
-    """Add a ledger entry. Balance is authoritative via SUM(delta_usd);
-    balance_after is a best-effort audit column computed at insert time."""
+    """Add a ledger entry. ``delta_usd`` is float USD on the API; it is stored
+    as integer micro-dollars. Balance is authoritative via SUM(delta_micros);
+    balance_after_micros is a best-effort audit column computed at insert time.
+    The returned row exposes float ``delta_usd`` / ``balance_after`` aliases so
+    existing callers keep working.
+    """
     ts = ts if ts is not None else time.time()
-    balance_after = round(get_balance(conn, org_id) + delta_usd, 6)
+    delta_micros = usd_to_micros(delta_usd)
+    balance_after_micros = get_balance_micros(conn, org_id) + delta_micros
     lid = new_id("led")
     conn.execute(
-        "INSERT INTO credit_ledger(id,org_id,delta_usd,kind,reason,stripe_ref,balance_after,ts)"
+        "INSERT INTO credit_ledger(id,org_id,delta_micros,kind,reason,stripe_ref,balance_after_micros,ts)"
         " VALUES(?,?,?,?,?,?,?,?)",
-        (lid, org_id, round(delta_usd, 6), kind, reason, stripe_ref, balance_after, ts),
+        (lid, org_id, delta_micros, kind, reason, stripe_ref, balance_after_micros, ts),
     )
     if commit:
         conn.commit()
-    return conn.execute("SELECT * FROM credit_ledger WHERE id=?", (lid,)).fetchone()
+    return get_ledger_entry(conn, lid)
 
 
-def ledger_history(conn, org_id: str, limit: int = 50) -> list[sqlite3.Row]:
-    return conn.execute(
+def _ledger_row_with_usd(row: Optional[sqlite3.Row]) -> Optional[dict]:
+    """Return a ledger row as a dict with float USD aliases added.
+
+    Adds ``delta_usd`` and ``balance_after`` (float USD) alongside the stored
+    ``*_micros`` integer columns so callers and templates can use either.
+    """
+    if row is None:
+        return None
+    d = dict(row)
+    d["delta_usd"] = micros_to_usd(d["delta_micros"])
+    d["balance_after"] = micros_to_usd(d["balance_after_micros"])
+    return d
+
+
+def get_ledger_entry(conn, ledger_id: str) -> Optional[dict]:
+    row = conn.execute("SELECT * FROM credit_ledger WHERE id=?", (ledger_id,)).fetchone()
+    return _ledger_row_with_usd(row)
+
+
+def ledger_history(conn, org_id: str, limit: int = 50) -> list[dict]:
+    rows = conn.execute(
         "SELECT * FROM credit_ledger WHERE org_id=? ORDER BY ts DESC, rowid DESC LIMIT ?",
         (org_id, limit),
     ).fetchall()
+    return [_ledger_row_with_usd(r) for r in rows]
 
 
 # ------------------------------------------------------------- stripe idemp ---
