@@ -127,13 +127,52 @@ def _minimal_yaml_read(path: Path) -> dict:
     """Tiny fallback reader (flat key: value, one level of nesting by indent).
 
     Only used if PyYAML is missing. Good enough to read a config we wrote.
+    Supports simple YAML (key: value, one level of 2-space-indented nesting)
+    and JSON as a fallback.
     """
     try:
-        import json
         text = path.read_text(encoding="utf-8")
-        # we may have written JSON as a fallback
+        # Try JSON first if it looks like JSON
         if text.lstrip().startswith("{"):
+            import json
             return json.loads(text)
+        
+        # Parse simple YAML: 'key: value' and one level of '  nested: value'
+        result = {}
+        current_section = None
+        for line in text.splitlines():
+            stripped = line.rstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            
+            # Top-level key (no leading spaces)
+            if not line.startswith(" ") and ":" in stripped:
+                key, _, val = stripped.partition(":")
+                key = key.strip()
+                val = val.strip()
+                if val:
+                    # Simple value: try to parse as JSON literal, else string
+                    try:
+                        import json
+                        result[key] = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        result[key] = val
+                else:
+                    # Empty value means nested section follows
+                    result[key] = {}
+                    current_section = key
+            # Nested key (2-space indent)
+            elif line.startswith("  ") and ":" in stripped and current_section:
+                key, _, val = stripped.strip().partition(":")
+                key = key.strip()
+                val = val.strip()
+                if val:
+                    try:
+                        import json
+                        result[current_section][key] = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        result[current_section][key] = val
+        return result
     except Exception:
         pass
     return {}
@@ -231,8 +270,18 @@ def _strip_env_secrets(cfg: dict) -> dict:
 def save(cfg: dict) -> Path:
     """Persist config to disk. Secrets that came from the environment are
     stripped first (see :func:`_strip_env_secrets`) — ``config.yaml`` should
-    never hold a live key that was provided via env."""
+    never hold a live key that was provided via env.
+    
+    Creates a timestamped backup of the existing config before overwriting.
+    """
     path = config_path()
+    # Create timestamped backup if file already exists
+    if path.exists():
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_path = path.with_suffix(f".yaml.bak-{timestamp}")
+        import shutil
+        shutil.copy2(path, backup_path)
     _dump_yaml(path, _strip_env_secrets(cfg))
     return path
 

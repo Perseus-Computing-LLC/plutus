@@ -379,6 +379,7 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="plutus", description=f"Plutus — {__tagline__}")
     p.add_argument("--version", action="version", version=f"plutus v{__version__}")
+    p.add_argument("--db", help="database path (overrides PLUTUS_DB)")
     sub = p.add_subparsers(dest="cmd")
 
     pi = sub.add_parser("init", help="create config + database")
@@ -480,6 +481,9 @@ def main(argv=None):
     _force_utf8()
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Wire --db through to PLUTUS_DB env var so all db.connect() calls honor it
+    if hasattr(args, 'db') and args.db:
+        os.environ['PLUTUS_DB'] = args.db
     if not getattr(args, "func", None):
         parser.print_help()
         return 0

@@ -15,6 +15,7 @@ from urllib.parse import urlparse, parse_qs
 
 from .. import __version__, bridge, config as cfgmod, db
 from ..billing import StripeClient, BillingError, handle_webhook_event
+from ..utils import strict_int
 from . import api, views, auth as authmod
 
 # Paths reachable without a session when auth is enabled.
@@ -317,10 +318,10 @@ class Handler(BaseHTTPRequestHandler):
                     conn, org_id, provider=str(ev["provider"]),
                     model=ev.get("model"), task_type=ev.get("task_type", "general"),
                     workspace=ev.get("workspace"),
-                    input_tokens=int(ev.get("input_tokens", 0) or 0),
-                    output_tokens=int(ev.get("output_tokens", 0) or 0),
-                    cache_read_tokens=int(ev.get("cache_read_tokens", 0) or 0),
-                    reasoning_tokens=int(ev.get("reasoning_tokens", 0) or 0),
+                    input_tokens=strict_int(ev.get("input_tokens", 0) or 0),
+                    output_tokens=strict_int(ev.get("output_tokens", 0) or 0),
+                    cache_read_tokens=strict_int(ev.get("cache_read_tokens", 0) or 0),
+                    reasoning_tokens=strict_int(ev.get("reasoning_tokens", 0) or 0),
                     cost_usd=ev.get("cost_usd"),
                     source=ev.get("source", "api"),
                     pricing_overrides=cfg.get("pricing", {}).get("overrides"),

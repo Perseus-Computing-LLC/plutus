@@ -135,7 +135,7 @@ def _claims_from_id_token(id_token: str, cfg, nonce: str) -> dict:
         raise AuthError("id_token nonce mismatch")
     if not claims.get("email"):
         raise AuthError("id_token has no email")
-    if claims.get("email_verified") in (False, "false"):
+    if claims.get("email_verified") not in (True, "true"):
         raise AuthError("email is not verified")
     return claims
 
