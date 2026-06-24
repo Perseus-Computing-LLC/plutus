@@ -206,6 +206,25 @@ class TestFreeTierLimits(unittest.TestCase):
         metering.record_usage(self.conn, self.org, provider="x",
                               input_tokens=6000, output_tokens=4000, cost_usd=0)
         self.assertEqual(metering.tracked_tokens_mtd(self.conn, self.org), 10000)
+    
+    def test_block_over_balance(self):
+        """Fix #28: block_over_balance prevents debits past zero."""
+        db.add_ledger(self.conn, self.org, 5.0, "topup")
+        r = metering.record_usage(self.conn, self.org, provider="anthropic",
+                                  cost_usd=10.0, block_over_balance=True)
+        self.assertFalse(r.recorded)
+        self.assertTrue(r.over_balance)
+        self.assertEqual(r.event_id, "")
+        self.assertAlmostEqual(db.get_balance(self.conn, self.org), 5.0, places=4)
+    
+    def test_block_over_balance_allows_within_limit(self):
+        """Fix #28: block_over_balance allows events within balance."""
+        db.add_ledger(self.conn, self.org, 10.0, "topup")
+        r = metering.record_usage(self.conn, self.org, provider="anthropic",
+                                  cost_usd=5.0, block_over_balance=True)
+        self.assertTrue(r.recorded)
+        self.assertFalse(r.over_balance)
+        self.assertAlmostEqual(db.get_balance(self.conn, self.org), 5.0, places=4)
 
 
 class TestApiKeys(unittest.TestCase):
@@ -295,6 +314,40 @@ class TestBillingWebhook(unittest.TestCase):
         res2 = handle_webhook_event(self.conn, event)  # replay
         self.assertEqual(res2["status"], "duplicate")
         self.assertAlmostEqual(db.get_balance(self.conn, self.org), 10.0, places=2)
+    
+    def test_concurrent_webhook_credits_once(self):
+        """Fix #26: concurrent duplicate deliveries credit only once."""
+        event = {
+            "id": "evt_concurrent", "type": "checkout.session.completed",
+            "data": {"object": {"id": "cs_conc", "mode": "payment",
+                                 "customer": "cus_123", "amount_total": 2000,
+                                 "metadata": {"kind": "credit"}}},
+        }
+        res1 = handle_webhook_event(self.conn, event)
+        res2 = handle_webhook_event(self.conn, event)
+        self.assertEqual(res1["status"], "credited")
+        self.assertEqual(res2["status"], "duplicate")
+        self.assertAlmostEqual(db.get_balance(self.conn, self.org), 20.0, places=2)
+    
+    def test_mark_stripe_event_atomicity(self):
+        """Fix #26: mark_stripe_event returns True then False for same id."""
+        claimed1 = db.mark_stripe_event(self.conn, "evt_atomic", "test.type")
+        claimed2 = db.mark_stripe_event(self.conn, "evt_atomic", "test.type")
+        self.assertTrue(claimed1)
+        self.assertFalse(claimed2)
+    
+    def test_checkout_prefers_amount_total(self):
+        """Fix #29: amount_total wins over metadata.amount_usd."""
+        event = {
+            "id": "evt_amount", "type": "checkout.session.completed",
+            "data": {"object": {"id": "cs_amt", "mode": "payment",
+                                 "customer": "cus_123", "amount_total": 5000,
+                                 "metadata": {"kind": "credit", "amount_usd": "999.00"}}},
+        }
+        res = handle_webhook_event(self.conn, event)
+        self.assertEqual(res["status"], "credited")
+        self.assertAlmostEqual(res["amount_usd"], 50.0, places=2)
+        self.assertAlmostEqual(db.get_balance(self.conn, self.org), 50.0, places=2)
 
     def test_subscription_sets_tier(self):
         event = {

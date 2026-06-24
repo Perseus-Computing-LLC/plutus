@@ -90,6 +90,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # (returns a non-recorded result) — off by default so no billing data
         # is ever silently dropped.
         "block_over_free_limit": False,
+        # Prepaid credit hard-stop: when enabled and an org has prepaid credit,
+        # events that would push the balance negative are rejected (not recorded).
+        "block_over_balance": False,
     },
 }
 

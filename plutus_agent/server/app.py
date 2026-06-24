@@ -308,12 +308,26 @@ class Handler(BaseHTTPRequestHandler):
 
         from .. import metering
         cfg = self.ctx.cfg
-        block = bool(cfg.get("pricing", {}).get("block_over_free_limit"))
-        out, n_blocked = [], 0
+        block_free = bool(cfg.get("pricing", {}).get("block_over_free_limit"))
+        block_balance = bool(cfg.get("pricing", {}).get("block_over_balance"))
+        
+        # Fix #27: validate ALL events before recording ANY
         for ev in events:
             if not isinstance(ev, dict) or not ev.get("provider"):
                 return self._json(400, {"error": "each event needs a 'provider'"})
+            # Validate int fields can coerce
             try:
+                int(ev.get("input_tokens", 0) or 0)
+                int(ev.get("output_tokens", 0) or 0)
+                int(ev.get("cache_read_tokens", 0) or 0)
+                int(ev.get("reasoning_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                return self._json(400, {"error": "token fields must be integers"})
+        
+        # All valid — now record as a single transaction
+        out, n_blocked, n_over_balance = [], 0, 0
+        try:
+            for ev in events:
                 res = metering.record_usage(
                     conn, org_id, provider=str(ev["provider"]),
                     model=ev.get("model"), task_type=ev.get("task_type", "general"),
@@ -326,20 +340,28 @@ class Handler(BaseHTTPRequestHandler):
                     source=ev.get("source", "api"),
                     pricing_overrides=cfg.get("pricing", {}).get("overrides"),
                     alert_cfg=cfg.get("alerts", {}),
-                    block_over_limit=block,
+                    block_over_limit=block_free,
+                    block_over_balance=block_balance,
+                    commit=False,  # defer commit until all succeed
                 )
-            except (TypeError, ValueError) as e:
-                return self._json(400, {"error": f"bad event: {e}"})
-            if not res.recorded:
-                n_blocked += 1
-            out.append({
-                "recorded": res.recorded,
-                "event_id": res.event_id or None,
-                "cost_usd": res.cost_usd,
-                "estimated": res.estimated,
-                "balance_after": res.balance_after,
-                "over_free_limit": res.over_free_limit,
-            })
+                if not res.recorded:
+                    if res.over_balance:
+                        n_over_balance += 1
+                    else:
+                        n_blocked += 1
+                out.append({
+                    "recorded": res.recorded,
+                    "event_id": res.event_id or None,
+                    "cost_usd": res.cost_usd,
+                    "estimated": res.estimated,
+                    "balance_after": res.balance_after,
+                    "over_free_limit": res.over_free_limit,
+                    "over_balance": res.over_balance,
+                })
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            return self._json(400, {"error": "batch recording failed"})
 
         st = metering.tier_status(conn, org_id)
         body = {
@@ -352,12 +374,18 @@ class Handler(BaseHTTPRequestHandler):
             body.update(out[0])
         else:
             body["results"] = out
-            body["recorded"] = len(out) - n_blocked
+            body["recorded"] = len(out) - n_blocked - n_over_balance
             body["blocked"] = n_blocked
-        # 402 only when nothing landed because the free quota is exhausted.
+        
+        # 402 when nothing landed (either free quota exhausted or balance exhausted)
         if n_blocked == len(out):
             base = (cfg.get("auth", {}).get("base_url") or "").rstrip("/")
             body["error"] = "free-tier token quota reached — upgrade to Pro"
+            body["upgrade_url"] = (base + "/pricing") if base else "/pricing"
+            return self._json(402, body)
+        if n_over_balance == len(out):
+            base = (cfg.get("auth", {}).get("base_url") or "").rstrip("/")
+            body["error"] = "prepaid credit exhausted"
             body["upgrade_url"] = (base + "/pricing") if base else "/pricing"
             return self._json(402, body)
         return self._json(200, body)

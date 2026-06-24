@@ -41,6 +41,7 @@ class MeterResult:
     alerts: list  # list of dicts {kind, message}
     recorded: bool = True        # False when a hard free-tier cap dropped the event
     over_free_limit: bool = False  # org is on a limited tier and past its monthly quota
+    over_balance: bool = False  # Fix #28: org hit prepaid credit hard-stop
 
 
 def _resolve_workspace(conn, org_id: str, workspace: Optional[str]) -> Optional[str]:
@@ -80,13 +81,19 @@ def record_usage(conn, org_id: str, provider: str,
                  pricing_overrides: Optional[dict] = None,
                  ts: Optional[float] = None,
                  alert_cfg: Optional[dict] = None,
-                 block_over_limit: bool = False) -> MeterResult:
+                 block_over_limit: bool = False,
+                 block_over_balance: bool = False,
+                 commit: bool = True) -> MeterResult:
     """Meter one LLM/agent call. Returns a :class:`MeterResult`.
 
     Free-tier quota: an org on a limited tier is flagged ``over_free_limit``
     once its month-to-date tracked tokens reach the tier cap. With
     ``block_over_limit`` the event past the cap is *not* recorded (``recorded``
     is False) — otherwise it is still recorded so no billing data is lost.
+    
+    Prepaid credit hard-stop (fix #28): with ``block_over_balance`` on, if the
+    org has ever had credit and the event would push balance negative, it is
+    rejected (not recorded).
     """
     ts = ts if ts is not None else time.time()
 
@@ -113,6 +120,23 @@ def record_usage(conn, org_id: str, provider: str,
             cache_read_tokens, reasoning_tokens, pricing_overrides,
         )
     cost_usd = round(float(cost_usd), 6)
+    
+    # Fix #28: prepaid credit hard-stop
+    balance = db.get_balance(conn, org_id)
+    if block_over_balance:
+        # Check if org has ever had credit
+        had_credit = conn.execute(
+            "SELECT 1 FROM credit_ledger WHERE org_id=? AND kind IN ('topup','grant') LIMIT 1",
+            (org_id,),
+        ).fetchone()
+        if had_credit and balance - cost_usd < 0:
+            return MeterResult(
+                event_id="", org_id=org_id, workspace_id=workspace_id,
+                provider=provider, model=model, task_type=task_type,
+                cost_usd=cost_usd, estimated=estimated,
+                balance_after=balance, alerts=[],
+                recorded=False, over_free_limit=False, over_balance=True,
+            )
 
     eid = db.new_id("evt")
     conn.execute(
@@ -126,18 +150,18 @@ def record_usage(conn, org_id: str, provider: str,
 
     # Deplete prepaid credit (only when there's credit to deplete; orgs on the
     # free tier with no balance still get full usage tracking, just no debit).
-    balance = db.get_balance(conn, org_id)
     if balance > 0 or cost_usd > 0:
         row = db.add_ledger(conn, org_id, -cost_usd, "debit",
                             reason=f"{provider}/{model or '-'} {task_type}",
-                            stripe_ref=eid, ts=ts)
+                            stripe_ref=eid, ts=ts, commit=False)
         balance_after = float(row["balance_after"])
     else:
         balance_after = balance
-    conn.commit()
+    if commit:
+        conn.commit()
 
     alerts = _check_thresholds(conn, org_id, workspace_id, balance_after,
-                               cost_usd, ts, alert_cfg or {})
+                               cost_usd, ts, alert_cfg or {}, commit=commit)
 
     over = limit is not None and (tracked_before + event_tokens) >= limit
     return MeterResult(
@@ -150,7 +174,7 @@ def record_usage(conn, org_id: str, provider: str,
 
 
 def _check_thresholds(conn, org_id, workspace_id, balance_after, cost_usd,
-                      ts, alert_cfg) -> list:
+                      ts, alert_cfg, commit: bool = True) -> list:
     """Queue alerts when credit runs low or a workspace nears/exceeds its cap.
 
     Alerts are *logged* here (so the dashboard can show them and a sender can
@@ -169,12 +193,12 @@ def _check_thresholds(conn, org_id, workspace_id, balance_after, cost_usd,
     if had_credit and 0 < balance_after <= low:
         msg = f"Low credit balance: ${balance_after:,.2f} (threshold ${low:,.2f})"
         if not _alerted_recently(conn, org_id, "low_balance", None, ts):
-            db.log_alert(conn, org_id, "low_balance", msg)
+            db.log_alert(conn, org_id, "low_balance", msg, commit=commit)
             raised.append({"kind": "low_balance", "message": msg})
     elif had_credit and balance_after <= 0:
         msg = f"Credit exhausted: balance ${balance_after:,.2f}"
         if not _alerted_recently(conn, org_id, "balance_exhausted", None, ts):
-            db.log_alert(conn, org_id, "balance_exhausted", msg)
+            db.log_alert(conn, org_id, "balance_exhausted", msg, commit=commit)
             raised.append({"kind": "balance_exhausted", "message": msg})
 
     # workspace monthly budget
@@ -195,7 +219,7 @@ def _check_thresholds(conn, org_id, workspace_id, balance_after, cost_usd,
             else:
                 return raised
             if not _alerted_recently(conn, org_id, kind, workspace_id, ts):
-                db.log_alert(conn, org_id, kind, msg, workspace_id=workspace_id)
+                db.log_alert(conn, org_id, kind, msg, workspace_id=workspace_id, commit=commit)
                 raised.append({"kind": kind, "message": msg})
     return raised
 
