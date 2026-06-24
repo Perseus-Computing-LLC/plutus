@@ -188,21 +188,27 @@ def handle_webhook_event(conn, event: dict) -> dict:
     """
     event_id = event.get("id", "")
     etype = event.get("type", "")
-    if event_id and db.stripe_event_seen(conn, event_id):
+    
+    # Atomically claim the event first (fix #26: prevent concurrent double-credit)
+    if event_id and not db.mark_stripe_event(conn, event_id, etype):
         return {"status": "duplicate", "type": etype, "id": event_id}
 
     obj = (event.get("data") or {}).get("object") or {}
     result = {"status": "ignored", "type": etype, "id": event_id}
 
-    if etype == "checkout.session.completed":
-        result = _apply_checkout_completed(conn, obj)
-    elif etype in ("customer.subscription.created", "customer.subscription.updated"):
-        result = _apply_subscription_change(conn, obj)
-    elif etype == "customer.subscription.deleted":
-        result = _apply_subscription_deleted(conn, obj)
+    try:
+        if etype == "checkout.session.completed":
+            result = _apply_checkout_completed(conn, obj)
+        elif etype in ("customer.subscription.created", "customer.subscription.updated"):
+            result = _apply_subscription_change(conn, obj)
+        elif etype == "customer.subscription.deleted":
+            result = _apply_subscription_deleted(conn, obj)
+    except Exception:
+        # Rollback the event claim so it can be retried
+        if event_id:
+            db.unmark_stripe_event(conn, event_id)
+        raise
 
-    if event_id:
-        db.mark_stripe_event(conn, event_id, etype)
     result.setdefault("type", etype)
     result.setdefault("id", event_id)
     return result
@@ -228,11 +234,13 @@ def _apply_checkout_completed(conn, obj) -> dict:
     meta = obj.get("metadata") or {}
     kind = meta.get("kind")
     if kind == "credit" or obj.get("mode") == "payment":
-        amount = meta.get("amount_usd")
-        if amount is not None:
-            usd = float(amount)
+        # Fix #29: prefer Stripe's collected amount_total over client-supplied metadata
+        amount_total = obj.get("amount_total")
+        if amount_total is not None:
+            usd = float(amount_total) / 100.0
         else:
-            usd = float(obj.get("amount_total") or 0) / 100.0
+            amount = meta.get("amount_usd")
+            usd = float(amount) if amount is not None else 0.0
         row = db.add_ledger(conn, org_id, usd, "topup",
                             reason="Stripe checkout", stripe_ref=obj.get("id"))
         return {"status": "credited", "org_id": org_id, "amount_usd": usd,

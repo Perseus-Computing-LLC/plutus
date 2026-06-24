@@ -248,6 +248,114 @@ class TestIngestQuota(unittest.TestCase):
         m.close()
 
 
+class TestBatchAtomicity(unittest.TestCase):
+    """Fix #27: batch POST /v1/usage must be all-or-nothing."""
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = db.connect(cls.dbpath)
+        db.init_schema(conn)
+        cls.org_id = db.create_org(conn, "Batch Co", tier="pro")["id"]
+        _, cls.key = db.create_api_key(conn, cls.org_id)
+        conn.close()
+
+        ctx = app._Ctx(dict(DEFAULT_CONFIG), cls.dbpath, demo=False)
+        cls.httpd = app._Server(("127.0.0.1", 0), app.Handler, ctx)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(cls.dbpath + ext)
+            except OSError:
+                pass
+    
+    def _post(self, payload):
+        url = f"http://127.0.0.1:{self.port}/v1/usage"
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.key}"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+    
+    def test_malformed_second_event_records_nothing(self):
+        """Fix #27: if event 2 is invalid, event 1 must not commit."""
+        conn = db.connect(self.dbpath)
+        from plutus_agent import metering
+        before = metering.tracked_tokens_mtd(conn, self.org_id)
+        conn.close()
+        
+        status, body = self._post([
+            {"provider": "anthropic", "input_tokens": 1000},
+            {"provider": "", "input_tokens": 500},  # invalid: empty provider
+        ])
+        self.assertEqual(status, 400)
+        
+        conn = db.connect(self.dbpath)
+        after = metering.tracked_tokens_mtd(conn, self.org_id)
+        conn.close()
+        self.assertEqual(before, after, "No tokens should have been recorded")
+
+
+class TestPrepaidHardStop(unittest.TestCase):
+    """Fix #28: block_over_balance prevents debits past zero."""
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = db.connect(cls.dbpath)
+        db.init_schema(conn)
+        cls.org_id = db.create_org(conn, "Prepaid Co", tier="pro")["id"]
+        _, cls.key = db.create_api_key(conn, cls.org_id)
+        db.add_ledger(conn, cls.org_id, 1.0, "topup")  # $1 credit
+        conn.close()
+
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["pricing"] = dict(cfg["pricing"], block_over_balance=True)
+        ctx = app._Ctx(cfg, cls.dbpath, demo=False)
+        cls.httpd = app._Server(("127.0.0.1", 0), app.Handler, ctx)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(cls.dbpath + ext)
+            except OSError:
+                pass
+    
+    def test_over_balance_returns_402(self):
+        """Fix #28: POST /v1/usage with cost > balance returns 402."""
+        url = f"http://127.0.0.1:{self.port}/v1/usage"
+        req = urllib.request.Request(
+            url, data=json.dumps({"provider": "anthropic", "cost_usd": 10.0}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.key}"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            self.fail("expected 402")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 402)
+            body = json.loads(e.read().decode())
+            self.assertFalse(body["recorded"])
+            self.assertTrue(body["over_balance"])
+            self.assertIn("credit exhausted", body["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

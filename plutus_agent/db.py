@@ -88,7 +88,7 @@ CREATE INDEX IF NOT EXISTS ix_ledger_org_ts ON credit_ledger(org_id, ts);
 CREATE TABLE IF NOT EXISTS alerts_log (
     id           TEXT PRIMARY KEY,
     org_id       TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    workspace_id TEXT,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
     kind         TEXT NOT NULL,            -- low_balance|budget_warn|budget_cap
     message      TEXT NOT NULL,
     delivered    INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +153,7 @@ def connect(path: Optional[str | Path] = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")  # Fix #30: wait on lock instead of error
     return conn
 
 
@@ -419,7 +420,9 @@ def get_balance(conn, org_id: str) -> float:
 
 def add_ledger(conn, org_id: str, delta_usd: float, kind: str,
                reason: str = "", stripe_ref: Optional[str] = None,
-               ts: Optional[float] = None) -> sqlite3.Row:
+               ts: Optional[float] = None, commit: bool = True) -> sqlite3.Row:
+    """Add a ledger entry. Balance is authoritative via SUM(delta_usd);
+    balance_after is a best-effort audit column computed at insert time."""
     ts = ts if ts is not None else time.time()
     balance_after = round(get_balance(conn, org_id) + delta_usd, 6)
     lid = new_id("led")
@@ -428,7 +431,8 @@ def add_ledger(conn, org_id: str, delta_usd: float, kind: str,
         " VALUES(?,?,?,?,?,?,?,?)",
         (lid, org_id, round(delta_usd, 6), kind, reason, stripe_ref, balance_after, ts),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return conn.execute("SELECT * FROM credit_ledger WHERE id=?", (lid,)).fetchone()
 
 
@@ -446,24 +450,34 @@ def stripe_event_seen(conn, event_id: str) -> bool:
     ).fetchone() is not None
 
 
-def mark_stripe_event(conn, event_id: str, type_: str) -> None:
-    conn.execute(
+def mark_stripe_event(conn, event_id: str, type_: str) -> bool:
+    """Mark a Stripe event as processed atomically. Returns True if newly inserted."""
+    cur = conn.execute(
         "INSERT OR IGNORE INTO stripe_events(event_id,type,processed_at) VALUES(?,?,?)",
         (event_id, type_, time.time()),
     )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def unmark_stripe_event(conn, event_id: str) -> None:
+    """Remove a Stripe event claim (for rollback on side-effect failure)."""
+    conn.execute("DELETE FROM stripe_events WHERE event_id=?", (event_id,))
     conn.commit()
 
 
 # -------------------------------------------------------------- alerts log ---
 def log_alert(conn, org_id: str, kind: str, message: str,
-              workspace_id: Optional[str] = None, delivered: bool = False) -> sqlite3.Row:
+              workspace_id: Optional[str] = None, delivered: bool = False,
+              commit: bool = True) -> sqlite3.Row:
     aid = new_id("alr")
     conn.execute(
         "INSERT INTO alerts_log(id,org_id,workspace_id,kind,message,delivered,ts)"
         " VALUES(?,?,?,?,?,?,?)",
         (aid, org_id, workspace_id, kind, message, int(delivered), time.time()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return conn.execute("SELECT * FROM alerts_log WHERE id=?", (aid,)).fetchone()
 
 
