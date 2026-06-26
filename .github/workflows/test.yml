@@ -42,11 +42,20 @@ jobs:
         run: python3 -m pytest test_plutus.py -v
 
   engine:
-    name: monetization engine (plutus_agent)
-    runs-on: ubuntu-latest
+    name: engine (plutus_agent) — ${{ matrix.os }} py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        # Full Python range on Linux (matches the pyproject classifiers),
+        # plus Windows + macOS smoke on a current Python for cross-platform parity.
+        os: [ubuntu-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -58,9 +67,10 @@ jobs:
         run: pip install ".[all]" pytest
 
       - name: Lint — compileall
-        run: python3 -m compileall -q plutus_agent
+        run: python -m compileall -q plutus_agent
 
       - name: CLI smoke
+        shell: bash  # Git Bash on Windows — the pipes/grep/line-continuations need it
         run: |
           plutus version | grep 'plutus v'
           plutus pricing | grep -i 'Pro'
@@ -70,4 +80,4 @@ jobs:
           plutus status
 
       - name: Run engine + server tests
-        run: python3 -m pytest tests/ -v
+        run: python -m pytest tests/ -v
