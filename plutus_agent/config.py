@@ -48,6 +48,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "allow_signup": False,        # OPEN signup: any verified Google account gets
                                       # its own new Free-tier org (self-serve SaaS). Off
                                       # by default so a private instance stays allow-listed.
+        "max_new_orgs_per_day": 50,   # #33: DB-backed hard ceiling on self-serve org
+                                      # creation per rolling 24h (survives restarts);
+                                      # complements the in-memory hourly limiter. 0 = no cap.
         "session_ttl_hours": 168,     # session lifetime (7 days)
         "allow_unsigned_tokens": False,  # TEST ONLY: skip OIDC RS256 signature
                                       # verification. Never enable in production —

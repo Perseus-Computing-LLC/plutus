@@ -35,6 +35,11 @@ All notable changes to Plutus are documented here.
   resets to defaults.
 
 ### Security
+- **DB-backed per-day signup cap (#33)** — self-serve org creation now has a
+  hard ceiling per rolling 24h (`auth.max_new_orgs_per_day`, default 50),
+  counted from the `organizations` table so it survives process restarts —
+  unlike the existing in-memory hourly limiter, which it complements. Set to
+  `0` to disable.
 - **OIDC unsigned-token bypass removed** — signature verification was skipped for
   any id_token whose header segment literally equalled `"hdr"` (a test shim) on
   the production path. It is now gated behind an explicit, default-off
