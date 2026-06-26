@@ -504,9 +504,17 @@ class TestSameOrigin(unittest.TestCase):
         # Absent Origin AND Referer is rejected for safety.
         self.assertFalse(self._check("https://app.example.com", {}))
 
-    def test_unconfigured_base_url_cannot_verify(self):
-        # With no base_url the server can't judge origin, so it allows through.
-        self.assertTrue(self._check("", {"Origin": "https://anywhere.com"}))
+    def test_unconfigured_base_url_falls_back_to_host(self):
+        # Fix #32: with no base_url, judge origin against the request's own Host
+        # header (fail closed) — not "allow anything", as the old code did.
+        self.assertTrue(self._check(
+            "", {"Host": "app.example.com", "Origin": "https://app.example.com"}))
+        self.assertFalse(self._check(
+            "", {"Host": "app.example.com", "Origin": "https://evil.example.com"}))
+
+    def test_unconfigured_base_url_and_no_host_blocked(self):
+        # Nothing to compare against → reject (previously this allowed through).
+        self.assertFalse(self._check("", {"Origin": "https://anywhere.com"}))
 
     def test_origin_takes_precedence_over_referer(self):
         # A mismatched Origin blocks even when Referer would have matched.
