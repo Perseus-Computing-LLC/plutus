@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -55,6 +56,3 @@ packages = [
     "plutus_agent.server",
     "plutus_agent.integrations",
 ]
-
-[tool.setuptools.package-data]
-plutus_agent = ["assets/*"]

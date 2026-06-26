@@ -11,8 +11,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  release:
-    types: [published]
+  # Single trigger: tag-push only. (Previously this also fired on
+  # `release: published`, so cutting a GitHub Release from a tag ran the
+  # workflow twice and the second PyPI publish 400'd on "file already exists".)
 
 permissions:
   contents: read
