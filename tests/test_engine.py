@@ -505,5 +505,52 @@ class TestSMTPTLSSecurity(unittest.TestCase):
             drop_conn(conn)
 
 
+class TestConcurrencyHardStop(unittest.TestCase):
+    """Fix #28/#30: under db.immediate() the prepaid hard-stop and balance_after
+    are race-safe. Ten threads race to debit $1 against a $5 balance; exactly
+    five may land, the balance never goes negative, and the balance_after audit
+    column is the exact running sum (no stale duplicates)."""
+
+    def test_concurrent_debits_respect_hard_stop(self):
+        import threading
+        conn = fresh_conn()
+        try:
+            path = _PATHS[id(conn)]
+            org = db.create_org(conn, "Race Co", tier="pro")["id"]
+            db.add_ledger(conn, org, 5.0, "topup")  # room for exactly 5 x $1
+
+            results = []
+            start = threading.Barrier(10)
+
+            def worker():
+                c = db.connect(path)
+                try:
+                    start.wait()  # release all threads together to maximize contention
+                    with db.immediate(c):
+                        r = metering.record_usage(
+                            c, org, provider="x", cost_usd=1.0,
+                            block_over_balance=True, commit=False)
+                    results.append(r.recorded)
+                finally:
+                    c.close()
+
+            threads = [threading.Thread(target=worker) for _ in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            self.assertEqual(sum(1 for r in results if r), 5)         # no overrun (not 6+)
+            self.assertAlmostEqual(db.get_balance(conn, org), 0.0, places=4)  # never negative
+            bals = sorted(
+                r["balance_after_micros"] for r in conn.execute(
+                    "SELECT balance_after_micros FROM credit_ledger "
+                    "WHERE kind='debit' AND org_id=?", (org,)).fetchall())
+            # exact running sum 4,3,2,1,0 — no duplicates a racy read would leave
+            self.assertEqual(bals, [0, 1_000_000, 2_000_000, 3_000_000, 4_000_000])
+        finally:
+            drop_conn(conn)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -44,13 +44,18 @@ class MeterResult:
     over_balance: bool = False  # Fix #28: org hit prepaid credit hard-stop
 
 
-def _resolve_workspace(conn, org_id: str, workspace: Optional[str]) -> Optional[str]:
+def _resolve_workspace(conn, org_id: str, workspace: Optional[str],
+                       commit: bool = True) -> Optional[str]:
     """Accept a workspace id, slug, or name; create-by-name if not found.
 
     Honors the org tier's workspace cap: once an org is at its limit (Free = 1),
     a usage event tagged with a *new* workspace folds into the org's earliest
     existing workspace instead of creating another. Tracking never breaks; the
     cap just stops the workspace count from growing.
+
+    ``commit`` is forwarded to :func:`db.create_workspace` so that, inside a
+    batch/transaction (``record_usage(commit=False)`` under ``db.immediate``),
+    auto-creating a workspace does not commit the open transaction early.
     """
     if not workspace:
         return None
@@ -69,7 +74,7 @@ def _resolve_workspace(conn, org_id: str, workspace: Optional[str]) -> Optional[
     cap = pricing.tier(org["tier"]).workspaces if org else None
     if cap is not None and len(existing) >= cap:
         return existing[0]["id"] if existing else None
-    return db.create_workspace(conn, org_id, workspace)["id"]
+    return db.create_workspace(conn, org_id, workspace, commit=commit)["id"]
 
 
 def record_usage(conn, org_id: str, provider: str,
@@ -111,7 +116,7 @@ def record_usage(conn, org_id: str, provider: str,
             recorded=False, over_free_limit=True,
         )
 
-    workspace_id = _resolve_workspace(conn, org_id, workspace)
+    workspace_id = _resolve_workspace(conn, org_id, workspace, commit=commit)
 
     estimated = cost_usd is None
     if estimated:

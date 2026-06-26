@@ -19,6 +19,7 @@ fully offline.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import secrets
 import sqlite3
@@ -184,6 +185,39 @@ def connect(path: Optional[str | Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")  # Fix #30: wait on lock instead of error
     return conn
+
+
+@contextlib.contextmanager
+def immediate(conn: sqlite3.Connection):
+    """Run a read-modify-write as one serialized SQLite ``IMMEDIATE`` transaction.
+
+    ``BEGIN IMMEDIATE`` takes the RESERVED write lock up front, so a balance or
+    free-tier-quota *read* and the dependent *insert* cannot interleave with
+    another writer — closing the #28 prepaid hard-stop overrun and the #30
+    free-tier-quota race under the threaded, connection-per-request server.
+    (``balance_after_micros`` itself is computed in-SQL by :func:`add_ledger`,
+    so it stays correct even outside this block.)
+
+    Commits on success, rolls back on error. The connection's ``isolation_level``
+    is set to manual for the duration and restored on exit, so callers that rely
+    on the default implicit-transaction behavior are unaffected. If a transaction
+    is already open (e.g. nested use), this is a no-op pass-through — the
+    outermost caller owns the commit.
+    """
+    if conn.in_transaction:
+        yield
+        return
+    prev = conn.isolation_level
+    conn.isolation_level = None  # take manual control of BEGIN/COMMIT
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.isolation_level = prev
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -449,7 +483,8 @@ def api_key_org(conn, secret: str) -> Optional[str]:
 
 # ------------------------------------------------------------- workspaces ----
 def create_workspace(conn, org_id: str, name: str,
-                     monthly_budget_usd: Optional[float] = None) -> sqlite3.Row:
+                     monthly_budget_usd: Optional[float] = None,
+                     commit: bool = True) -> sqlite3.Row:
     wid = new_id("ws")
     slug = slugify(name)
     n, base = 1, slug
@@ -463,7 +498,8 @@ def create_workspace(conn, org_id: str, name: str,
         " VALUES(?,?,?,?,?,?)",
         (wid, org_id, name, slug, usd_to_micros(monthly_budget_usd), time.time()),
     )
-    conn.commit()
+    if commit:  # skip when inside a caller-owned transaction (e.g. db.immediate)
+        conn.commit()
     return get_workspace(conn, wid)
 
 
@@ -519,18 +555,23 @@ def add_ledger(conn, org_id: str, delta_usd: float, kind: str,
                ts: Optional[float] = None, commit: bool = True) -> sqlite3.Row:
     """Add a ledger entry. ``delta_usd`` is float USD on the API; it is stored
     as integer micro-dollars. Balance is authoritative via SUM(delta_micros);
-    balance_after_micros is a best-effort audit column computed at insert time.
-    The returned row exposes float ``delta_usd`` / ``balance_after`` aliases so
-    existing callers keep working.
+    ``balance_after_micros`` is the running balance through this row.
+
+    Fix #30: the running balance is computed **in the INSERT itself**, as
+    ``SUM(existing deltas) + this delta``, so it is atomic with the write — two
+    concurrent debits for one org can no longer read the same stale balance and
+    persist a wrong/duplicate ``balance_after`` (SQLite serializes writers, so
+    the second INSERT's subquery sees the first row). The returned row exposes
+    float ``delta_usd`` / ``balance_after`` aliases so existing callers work.
     """
     ts = ts if ts is not None else time.time()
     delta_micros = usd_to_micros(delta_usd)
-    balance_after_micros = get_balance_micros(conn, org_id) + delta_micros
     lid = new_id("led")
     conn.execute(
         "INSERT INTO credit_ledger(id,org_id,delta_micros,kind,reason,stripe_ref,balance_after_micros,ts)"
-        " VALUES(?,?,?,?,?,?,?,?)",
-        (lid, org_id, delta_micros, kind, reason, stripe_ref, balance_after_micros, ts),
+        " VALUES(?,?,?,?,?,?,"
+        " COALESCE((SELECT SUM(delta_micros) FROM credit_ledger WHERE org_id=?),0)+?,?)",
+        (lid, org_id, delta_micros, kind, reason, stripe_ref, org_id, delta_micros, ts),
     )
     if commit:
         conn.commit()
