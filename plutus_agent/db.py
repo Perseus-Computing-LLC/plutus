@@ -462,10 +462,18 @@ def revoke_api_key(conn, key_id: str, org_id: Optional[str] = None) -> bool:
     return cur.rowcount > 0
 
 
+LAST_USED_THROTTLE_S = 60  # don't rewrite last_used_at more than once a minute
+
+
 def api_key_org(conn, secret: str) -> Optional[str]:
     """Resolve a presented API-key secret to its org_id, or None.
 
-    Touches ``last_used_at`` on success. Revoked keys never resolve.
+    Touches ``last_used_at`` on success, but at most once per
+    ``LAST_USED_THROTTLE_S`` seconds per key: every ``/v1/usage`` ingest
+    authenticates, and writing+committing this column on every call thrashed the
+    WAL and added write contention with the metering transaction (Fix #37 item
+    5). ``last_used_at`` is a coarse "recently used?" signal — minute precision
+    is plenty. Revoked keys never resolve.
     """
     if not secret or not secret.startswith(API_KEY_PREFIX):
         return None
@@ -475,9 +483,11 @@ def api_key_org(conn, secret: str) -> Optional[str]:
     ).fetchone()
     if not row:
         return None
-    conn.execute("UPDATE api_keys SET last_used_at=? WHERE id=?",
-                 (time.time(), row["id"]))
-    conn.commit()
+    now = time.time()
+    if now - (row["last_used_at"] or 0) >= LAST_USED_THROTTLE_S:
+        conn.execute("UPDATE api_keys SET last_used_at=? WHERE id=?",
+                     (now, row["id"]))
+        conn.commit()
     return row["org_id"]
 
 

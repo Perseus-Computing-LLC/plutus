@@ -49,6 +49,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
                                       # its own new Free-tier org (self-serve SaaS). Off
                                       # by default so a private instance stays allow-listed.
         "session_ttl_hours": 168,     # session lifetime (7 days)
+        "allow_unsigned_tokens": False,  # TEST ONLY: skip OIDC RS256 signature
+                                      # verification. Never enable in production —
+                                      # it lets a forged id_token through. The test
+                                      # suite sets this to inject fake tokens.
     },
     "billing": {
         # Stripe is optional. Leave keys empty to run fully offline; the
@@ -127,54 +131,73 @@ def _dump_yaml(path: Path, data: dict) -> None:
 
 
 def _minimal_yaml_read(path: Path) -> dict:
-    """Tiny fallback reader (flat key: value, one level of nesting by indent).
+    """Fallback reader used only when PyYAML is missing.
 
-    Only used if PyYAML is missing. Good enough to read a config we wrote.
-    Supports simple YAML (key: value, one level of 2-space-indented nesting)
-    and JSON as a fallback.
+    It must be able to read back what we write, including the block style
+    PyYAML emits (Fix #37 item 8 — the old reader silently lost block-style
+    lists, so a config saved with PyYAML and re-read without it reset to
+    defaults). Handles, with one level of 2-space nesting:
+
+      * scalars            ``key: value`` (JSON-literal parsed, else string)
+      * empty sections     ``key:`` followed by nested ``  sub: value``
+      * block sequences    ``key:`` / ``sub:`` followed by ``- item`` lines
+      * flow ``[]`` / ``{}`` empty collections, and whole-file JSON
+
+    Deeper-than-one-level nesting (e.g. ``pricing.overrides`` trees) is the
+    PyYAML-only path; that's fine, PyYAML is a declared dependency and we now
+    also persist JSON when it's absent so a same-environment round-trip is exact.
     """
+    import json
+
+    def _scalar(s: str):
+        try:
+            return json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return s
+
     try:
         text = path.read_text(encoding="utf-8")
-        # Try JSON first if it looks like JSON
         if text.lstrip().startswith("{"):
-            import json
             return json.loads(text)
-        
-        # Parse simple YAML: 'key: value' and one level of '  nested: value'
-        result = {}
-        current_section = None
-        for line in text.splitlines():
-            stripped = line.rstrip()
-            if not stripped or stripped.startswith("#"):
+
+        result: dict = {}
+        section = None        # the current nested dict, or None at top level
+        list_target = None    # (container, key) currently collecting a block list
+        for raw in text.splitlines():
+            line = raw.rstrip()
+            if not line or line.lstrip().startswith("#"):
                 continue
-            
-            # Top-level key (no leading spaces)
-            if not line.startswith(" ") and ":" in stripped:
-                key, _, val = stripped.partition(":")
-                key = key.strip()
-                val = val.strip()
+            indent = len(line) - len(line.lstrip(" "))
+            stripped = line.strip()
+
+            if stripped.startswith("- "):  # block-sequence item
+                if list_target is not None:
+                    container, key = list_target
+                    if not isinstance(container.get(key), list):
+                        container[key] = []
+                    container[key].append(_scalar(stripped[2:].strip()))
+                continue
+
+            if ":" not in stripped:
+                continue
+            key, _, val = stripped.partition(":")
+            key, val = key.strip(), val.strip()
+
+            if indent == 0:
                 if val:
-                    # Simple value: try to parse as JSON literal, else string
-                    try:
-                        import json
-                        result[key] = json.loads(val)
-                    except (json.JSONDecodeError, ValueError):
-                        result[key] = val
-                else:
-                    # Empty value means nested section follows
+                    result[key] = _scalar(val)
+                    section, list_target = None, None
+                else:  # empty value: a nested dict OR a block list follows
                     result[key] = {}
-                    current_section = key
-            # Nested key (2-space indent)
-            elif line.startswith("  ") and ":" in stripped and current_section:
-                key, _, val = stripped.strip().partition(":")
-                key = key.strip()
-                val = val.strip()
+                    section, list_target = result[key], (result, key)
+            else:  # nested under the current section
+                target = section if section is not None else result
                 if val:
-                    try:
-                        import json
-                        result[current_section][key] = json.loads(val)
-                    except (json.JSONDecodeError, ValueError):
-                        result[current_section][key] = val
+                    target[key] = _scalar(val)
+                    list_target = None
+                else:
+                    target[key] = {}
+                    list_target = (target, key)
         return result
     except Exception:
         pass

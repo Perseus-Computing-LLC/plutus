@@ -273,13 +273,16 @@ def _exchange_code(cfg, code: str) -> dict:
 
 
 def _claims_from_id_token(id_token: str, cfg, nonce: str) -> dict:
-    # Verify RS256 signature first (but skip for test tokens with "hdr" header)
     parts = id_token.split(".")
-    if len(parts) == 3 and parts[0] != "hdr":
-        _verify_rs256_signature(id_token)
-    
     if len(parts) != 3:
         raise AuthError("malformed id_token")
+    # Verify the RS256 signature against Google's JWKS. Skipping it is gated
+    # behind an explicit, default-off config flag (``auth.allow_unsigned_tokens``)
+    # used only by the test suite to inject fake tokens — previously any token
+    # whose header segment literally equalled "hdr" silently bypassed the
+    # verifier on the production path (#37).
+    if not cfg.get("auth", {}).get("allow_unsigned_tokens"):
+        _verify_rs256_signature(id_token)
     claims = json.loads(_b64url_decode(parts[1]))
     if claims.get("aud") != cfg["auth"]["google_client_id"]:
         raise AuthError("id_token audience mismatch")

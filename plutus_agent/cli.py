@@ -122,6 +122,10 @@ def cmd_status(args):
 def cmd_org(args):
     conn = _conn()
     if args.action == "create":
+        if not (args.name or "").strip():
+            conn.close()
+            sys.exit('plutus: `plutus org create` needs a NAME, '
+                     'e.g. `plutus org create "Acme Inc"`')
         org = db.create_org(conn, args.name, tier=args.tier, owner_email=args.email)
         _ok(f"organization '{org['name']}' ({org['id']}) on {org['tier']} plan")
     elif args.action == "list":
@@ -135,6 +139,10 @@ def cmd_workspace(args):
     conn = _conn()
     org = _resolve_org(conn, args.org)
     if args.action == "create":
+        if not (args.name or "").strip():
+            conn.close()
+            sys.exit('plutus: `plutus workspace create` needs a NAME, '
+                     'e.g. `plutus workspace create prod`')
         ws = db.create_workspace(conn, org["id"], args.name, args.budget)
         cap = f"${args.budget:,.2f}/mo cap" if args.budget else "no cap"
         _ok(f"workspace '{ws['name']}' ({ws['id']}) — {cap}")
@@ -298,8 +306,13 @@ def cmd_install_hook(args):
             settings = json.loads(path.read_text(encoding="utf-8") or "{}")
         except Exception as e:
             sys.exit(f"plutus: could not parse {path}: {e}")
+        # Back up the *pristine* original once — copying the raw bytes so comments
+        # and formatting survive. Re-running must not clobber that first backup
+        # with an already-modified file, so we only write it if none exists.
         backup = path.with_suffix(path.suffix + ".plutus-bak")
-        backup.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        if not backup.exists():
+            import shutil
+            shutil.copy2(path, backup)
     settings, changed = _merge_stop_hook(settings, command)
     if not changed:
         _ok(f"Claude Code hook already installed in {path}")

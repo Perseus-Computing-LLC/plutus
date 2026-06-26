@@ -2,6 +2,33 @@
 
 All notable changes to Plutus are documented here.
 
+## [Unreleased]
+
+### Fixed — 1.0 punch-list (#37)
+- **`org create` / `workspace create` with no NAME** now exit with a usage
+  message instead of crashing in `slugify(None)`.
+- **500 responses no longer leak `str(exception)`** — both the GET error page and
+  the POST JSON return a generic message plus a short reference id; the full
+  exception is logged server-side under that id.
+- **Reflected-XSS surface closed** — the 404 handler now HTML-escapes the
+  request path before rendering it.
+- **Ambiguous-org guard** — state-changing POSTs (billing, API keys) require an
+  explicit `org` when the signed-in user belongs to more than one, instead of
+  silently acting on the earliest org. Dashboard GETs stay lenient.
+- **`api_key_org` throttles `last_used_at`** to at most once per 60s per key,
+  removing per-ingest WAL thrash / write contention with the metering txn.
+- **`install-claude-hook` backup** copies the pristine original bytes once and no
+  longer clobbers that backup (or re-serializes away comments) on re-runs.
+- **PyYAML-free config reader** now reads back the block-style lists PyYAML
+  writes, so a config saved with PyYAML and re-read without it no longer silently
+  resets to defaults.
+
+### Security
+- **OIDC unsigned-token bypass removed** — signature verification was skipped for
+  any id_token whose header segment literally equalled `"hdr"` (a test shim) on
+  the production path. It is now gated behind an explicit, default-off
+  `auth.allow_unsigned_tokens` flag used only by the test suite. (#37)
+
 ## [0.7.0] — 2026-06-24
 
 Security hardening — the second of the two 1.0 launch-gate milestones. Closes

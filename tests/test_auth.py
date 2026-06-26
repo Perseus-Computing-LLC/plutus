@@ -27,6 +27,10 @@ def _auth_cfg(**over):
         "google_client_id": "cid.apps.googleusercontent.com",
         "google_client_secret": "secret",
         "base_url": "http://127.0.0.1",
+        # Tests inject unsigned ``_jwt`` tokens; opt into the (default-off)
+        # signature-skip flag. Tests that exercise the real RS256 verifier set
+        # this back to False explicitly.
+        "allow_unsigned_tokens": True,
     })
     cfg["auth"].update(over)
     return cfg
@@ -354,8 +358,8 @@ class TestRS256Verification(unittest.TestCase):
             authmod._verify_rs256_signature(tok)
 
     def test_claims_path_runs_verification(self):
-        # A non-"hdr" header forces _claims_from_id_token through the real verifier.
-        cfg = _auth_cfg()
+        # With allow_unsigned_tokens off, _claims_from_id_token runs the real verifier.
+        cfg = _auth_cfg(allow_unsigned_tokens=False)
         good = {"aud": cfg["auth"]["google_client_id"],
                 "iss": "https://accounts.google.com", "exp": time.time() + 3600,
                 "nonce": "n", "email": "owner@example.com", "email_verified": True}
@@ -521,9 +525,9 @@ class TestOIDCSignatureVerification(unittest.TestCase):
         # Bogus signature
         signature = base64.urlsafe_b64encode(b"bogus_signature").rstrip(b"=").decode()
         fake_token = f"{header}.{payload}.{signature}"
-        
-        cfg = _auth_cfg()
-        
+
+        cfg = _auth_cfg(allow_unsigned_tokens=False)  # exercise the real verifier
+
         # Should raise AuthError during signature verification
         with self.assertRaises(authmod.AuthError) as cm:
             authmod._claims_from_id_token(fake_token, cfg, "test-nonce")
