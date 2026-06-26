@@ -375,43 +375,46 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 return self._json(400, {"error": "token fields must be integers"})
         
-        # All valid — now record as a single transaction
+        # All valid — record the whole batch as one serialized transaction.
+        # Fix #27/#30: db.immediate() takes the write lock up front (BEGIN
+        # IMMEDIATE) so the per-event quota / prepaid hard-stop reads can't race
+        # a concurrent writer between the read and the insert, and commits once
+        # (no partial batch). record_usage(commit=False) defers to that commit.
         out, n_blocked, n_over_balance = [], 0, 0
         try:
-            for ev in events:
-                res = metering.record_usage(
-                    conn, org_id, provider=str(ev["provider"]),
-                    model=ev.get("model"), task_type=ev.get("task_type", "general"),
-                    workspace=ev.get("workspace"),
-                    input_tokens=strict_int(ev.get("input_tokens", 0) or 0),
-                    output_tokens=strict_int(ev.get("output_tokens", 0) or 0),
-                    cache_read_tokens=strict_int(ev.get("cache_read_tokens", 0) or 0),
-                    reasoning_tokens=strict_int(ev.get("reasoning_tokens", 0) or 0),
-                    cost_usd=ev.get("cost_usd"),
-                    source=ev.get("source", "api"),
-                    pricing_overrides=cfg.get("pricing", {}).get("overrides"),
-                    alert_cfg=cfg.get("alerts", {}),
-                    block_over_limit=block_free,
-                    block_over_balance=block_balance,
-                    commit=False,  # defer commit until all succeed
-                )
-                if not res.recorded:
-                    if res.over_balance:
-                        n_over_balance += 1
-                    else:
-                        n_blocked += 1
-                out.append({
-                    "recorded": res.recorded,
-                    "event_id": res.event_id or None,
-                    "cost_usd": res.cost_usd,
-                    "estimated": res.estimated,
-                    "balance_after": res.balance_after,
-                    "over_free_limit": res.over_free_limit,
-                    "over_balance": res.over_balance,
-                })
-            conn.commit()
+            with db.immediate(conn):
+                for ev in events:
+                    res = metering.record_usage(
+                        conn, org_id, provider=str(ev["provider"]),
+                        model=ev.get("model"), task_type=ev.get("task_type", "general"),
+                        workspace=ev.get("workspace"),
+                        input_tokens=strict_int(ev.get("input_tokens", 0) or 0),
+                        output_tokens=strict_int(ev.get("output_tokens", 0) or 0),
+                        cache_read_tokens=strict_int(ev.get("cache_read_tokens", 0) or 0),
+                        reasoning_tokens=strict_int(ev.get("reasoning_tokens", 0) or 0),
+                        cost_usd=ev.get("cost_usd"),
+                        source=ev.get("source", "api"),
+                        pricing_overrides=cfg.get("pricing", {}).get("overrides"),
+                        alert_cfg=cfg.get("alerts", {}),
+                        block_over_limit=block_free,
+                        block_over_balance=block_balance,
+                        commit=False,  # defer commit to db.immediate()
+                    )
+                    if not res.recorded:
+                        if res.over_balance:
+                            n_over_balance += 1
+                        else:
+                            n_blocked += 1
+                    out.append({
+                        "recorded": res.recorded,
+                        "event_id": res.event_id or None,
+                        "cost_usd": res.cost_usd,
+                        "estimated": res.estimated,
+                        "balance_after": res.balance_after,
+                        "over_free_limit": res.over_free_limit,
+                        "over_balance": res.over_balance,
+                    })
         except Exception:
-            conn.rollback()
             return self._json(400, {"error": "batch recording failed"})
 
         st = metering.tier_status(conn, org_id)
