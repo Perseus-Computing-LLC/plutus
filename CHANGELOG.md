@@ -4,6 +4,17 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **Prepaid credit hard-stop is now ON by default (#28).** `pricing
+  .block_over_balance` defaults to `true`, so a prepaid org can no longer debit
+  unbounded amounts past a zero balance — `/v1/usage` returns `402` with
+  `over_balance` once a charge would go negative. It only affects orgs that have
+  actually held credit; pure free-tier tracking is never blocked. Trusted /
+  internal orgs can opt into track-only mode with a new per-org
+  `allow_negative_balance` flag, toggled via `plutus org allow-negative <org>` /
+  `plutus org enforce-balance <org>` (idempotent column migration on existing
+  databases).
+
 ### Fixed — 1.0 punch-list (#37)
 - **`org create` / `workspace create` with no NAME** now exit with a usage
   message instead of crashing in `slugify(None)`.
