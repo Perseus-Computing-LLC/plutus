@@ -332,6 +332,17 @@ def list_orgs(conn) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM organizations ORDER BY created_at").fetchall()
 
 
+def count_orgs_created_since(conn, since_ts: float) -> int:
+    """How many organizations were created at or after ``since_ts`` (epoch s).
+
+    Backs the #33 per-day self-serve org-creation cap; DB-backed so it survives
+    process restarts (unlike the in-memory hourly limiter)."""
+    row = conn.execute(
+        "SELECT COUNT(*) n FROM organizations WHERE created_at >= ?", (since_ts,)
+    ).fetchone()
+    return int(row["n"])
+
+
 def set_org_tier(conn, org_id: str, tier: str) -> None:
     conn.execute("UPDATE organizations SET tier=? WHERE id=?", (tier, org_id))
     conn.commit()

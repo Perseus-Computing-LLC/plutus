@@ -352,10 +352,16 @@ def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optio
         # allow-listed but no org to join → fall through to self-serve if open
 
     if auth.get("allow_signup"):
-        # Rate limit self-serve signups
+        # #33: DB-backed per-day org-creation ceiling (survives restarts), checked
+        # before the in-memory hourly limiter. A hard cap on how many new orgs
+        # self-serve signup can mint in a rolling 24h.
+        day_cap = int(auth.get("max_new_orgs_per_day", 0) or 0)
+        if day_cap > 0 and db.count_orgs_created_since(conn, time.time() - 86400) >= day_cap:
+            raise AuthError("daily signup limit reached — try again tomorrow")
+        # In-memory hourly limiter (first layer; resets on restart).
         if not _allow_signup_now():
             raise AuthError("signup temporarily rate-limited, try again later")
-        
+
         org = db.create_org(conn, _org_name_for(email, name), tier="free",
                             owner_email=email, owner_name=name)
         return db.users_by_email(conn, email)[0]["id"]
