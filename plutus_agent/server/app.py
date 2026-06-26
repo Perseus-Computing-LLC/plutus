@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import secrets
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +30,12 @@ MAX_BODY_BYTES = 1 * 1024 * 1024
 
 class _BodyTooLarge(Exception):
     """Raised when Content-Length exceeds MAX_BODY_BYTES."""
+
+
+class _OrgRequired(Exception):
+    """A signed-in user who belongs to >1 org issued a state-changing request
+    without naming one. We refuse rather than silently act on the earliest org
+    (Fix #37 item 4) — the caller turns this into a 400."""
 
 
 class _Ctx:
@@ -105,6 +112,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter, single-line
         sys.stderr.write("plutus %s — %s\n" % (self.address_string(), fmt % args))
 
+    def _log_exc(self, method, path, exc) -> str:
+        """Log an unhandled exception server-side with a short reference id and
+        return that id. Clients get only the id — never ``str(exc)`` — so SQLite
+        / internal detail can't leak through a 500 (Fix #37 item 2)."""
+        ref = secrets.token_hex(4)
+        sys.stderr.write(f"plutus: [{ref}] {method} {path} failed: {exc!r}\n")
+        return ref
+
     # ---- auth --------------------------------------------------------------
     def _gate(self, conn, path) -> bool:
         """When auth is on, require a session for non-public paths.
@@ -131,12 +146,19 @@ class Handler(BaseHTTPRequestHandler):
             return db.list_orgs_for_email(conn, self._user["email"])
         return db.list_orgs(conn)
 
-    def _authz_org(self, conn, requested):
+    def _authz_org(self, conn, requested, *, strict=False):
         """Resolve the org for this request, enforcing membership when signed in.
 
         Returns an org_id, or None meaning "no org available". Raises
         :class:`PermissionError` if a signed-in user asks for an org they are
         not a member of.
+
+        With ``strict`` (used by state-changing POSTs — billing, API keys), a
+        signed-in user who belongs to more than one org *must* name one: we raise
+        :class:`_OrgRequired` instead of silently defaulting to the earliest org,
+        so a blank ``org`` field can't bill/key the wrong one (Fix #37 item 4).
+        Dashboard GETs stay lenient — defaulting to the first org is the expected
+        landing behavior, with the org selector to switch.
         """
         if self._user is None:
             return requested or api.default_org_id(conn)
@@ -146,6 +168,8 @@ class Handler(BaseHTTPRequestHandler):
             if requested not in ids:
                 raise PermissionError(requested)
             return requested
+        if strict and len(orgs) > 1:
+            raise _OrgRequired()
         return orgs[0]["id"] if orgs else None
 
     def _auth_login(self):
@@ -239,13 +263,16 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/" or path == "/index.html":
                 return self._dashboard(conn, q)
             return self._send(404, views.simple_page("Not found", "404",
-                              f"No route for <span class='num'>{path}</span>.", ok=False))
+                              f"No route for <span class='num'>{html.escape(path)}</span>.",
+                              ok=False))
         except PermissionError:
             return self._json(403, {"error": "forbidden: not a member of that org"})
         except Exception as e:  # never 500 silently
-            sys.stderr.write(f"plutus: GET {path} failed: {e}\n")
-            return self._send(500, views.simple_page("Error", "Something broke",
-                              str(e), ok=False))
+            ref = self._log_exc("GET", path, e)
+            return self._send(500, views.simple_page(
+                "Error", "Something broke",
+                f"An internal error occurred. Reference: "
+                f"<span class='num'>{html.escape(ref)}</span>.", ok=False))
         finally:
             conn.close()
 
@@ -286,14 +313,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": f"no route for {path}"})
         except _BodyTooLarge:
             return self._json(413, {"error": "request body too large"})
+        except _OrgRequired:
+            return self._json(400, {"error": "specify which organization "
+                                    "(the 'org' field is required when you belong "
+                                    "to more than one)"})
         except PermissionError:
             return self._json(403, {"error": "forbidden: not a member of that org"})
         except BillingError as e:
+            # BillingError messages are operator-facing config guidance, not
+            # internal detail — safe to show.
             return self._send(400, views.simple_page("Billing", "Billing not available",
                               str(e), ok=False))
         except Exception as e:
-            sys.stderr.write(f"plutus: POST {path} failed: {e}\n")
-            return self._json(500, {"error": str(e)})
+            ref = self._log_exc("POST", path, e)
+            return self._json(500, {"error": "internal error", "ref": ref})
         finally:
             conn.close()
 
@@ -447,7 +480,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- API keys (session-gated; created from the dashboard) --------------
     def _keys_create(self, conn):
         f = self._form()
-        org_id = self._authz_org(conn, f.get("org"))
+        org_id = self._authz_org(conn, f.get("org"), strict=True)
         if not org_id:
             return self._send(400, views.simple_page(
                 "API keys", "No organization", "Create an org first.", ok=False))
@@ -458,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _keys_revoke(self, conn):
         f = self._form()
-        org_id = self._authz_org(conn, f.get("org"))
+        org_id = self._authz_org(conn, f.get("org"), strict=True)
         if org_id and f.get("key_id"):
             db.revoke_api_key(conn, f.get("key_id"), org_id)
         return self._redirect("/")
@@ -466,7 +499,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- billing -----------------------------------------------------------
     def _checkout_credit(self, conn):
         f = self._form()
-        org_id = self._authz_org(conn, f.get("org"))
+        org_id = self._authz_org(conn, f.get("org"), strict=True)
         if not org_id:
             raise BillingError("no organization to bill")
         amount = float(f.get("amount") or 50)
@@ -475,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _checkout_pro(self, conn):
         f = self._form()
-        org_id = self._authz_org(conn, f.get("org"))
+        org_id = self._authz_org(conn, f.get("org"), strict=True)
         if not org_id:
             raise BillingError("no organization to bill")
         sess = self.ctx.stripe.pro_checkout(conn, org_id)
@@ -483,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _portal(self, conn):
         f = self._form()
-        org_id = self._authz_org(conn, f.get("org"))
+        org_id = self._authz_org(conn, f.get("org"), strict=True)
         if not org_id:
             raise BillingError("no organization to bill")
         sess = self.ctx.stripe.portal(conn, org_id)
