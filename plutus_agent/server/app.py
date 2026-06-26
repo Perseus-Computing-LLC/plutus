@@ -176,28 +176,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _same_origin(self) -> bool:
-        """Check if the request is same-origin by comparing Origin/Referer to base_url."""
+        """CSRF defense: the request's Origin/Referer host must match our own.
+
+        Prefer the configured ``auth.base_url``; if it's unset, fall back to the
+        request's own ``Host`` header so we still **fail closed** — Fix #32: the
+        previous code returned ``True`` (allowing any cross-origin POST) whenever
+        ``base_url`` was unconfigured. A request carrying neither Origin nor
+        Referer is rejected.
+        """
         base_url = (self.ctx.cfg.get("auth", {}).get("base_url") or "").rstrip("/")
-        if not base_url:
-            # If no base_url configured, can't verify origin
-            return True
-        
-        from urllib.parse import urlparse
-        base_host = urlparse(base_url).netloc.lower()
-        
-        # Check Origin header first (preferred for CORS)
-        origin = self.headers.get("Origin", "")
-        if origin:
-            origin_host = urlparse(origin).netloc.lower()
-            return origin_host == base_host
-        
-        # Fall back to Referer
-        referer = self.headers.get("Referer", "")
-        if referer:
-            referer_host = urlparse(referer).netloc.lower()
-            return referer_host == base_host
-        
-        # No origin/referer headers — reject for safety
+        expected = (urlparse(base_url).netloc.lower() if base_url
+                    else (self.headers.get("Host") or "").lower())
+        if not expected:
+            return False
+        # Origin is preferred; Referer is the fallback. A present-but-mismatched
+        # Origin blocks even if Referer would match.
+        for header in ("Origin", "Referer"):
+            val = self.headers.get(header, "")
+            if val:
+                return urlparse(val).netloc.lower() == expected
         return False
 
     # ---- routing -----------------------------------------------------------

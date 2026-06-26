@@ -505,5 +505,24 @@ class TestSMTPTLSSecurity(unittest.TestCase):
             drop_conn(conn)
 
 
+class TestCliDbFlag(unittest.TestCase):
+    """Fix #47: `plutus --db <path>` must not crash (cli.py used os without
+    importing it, so any invocation with --db raised NameError)."""
+
+    def test_db_flag_sets_env_and_runs(self):
+        from plutus_agent import cli
+        d = os.path.join(tempfile.mkdtemp(), "cli.db")
+        prev = os.environ.pop("PLUTUS_DB", None)
+        try:
+            rc = cli.main(["--db", d, "version"])  # would NameError before the fix
+            self.assertEqual(rc, 0)
+            self.assertEqual(os.environ["PLUTUS_DB"], d)
+        finally:
+            if prev is not None:
+                os.environ["PLUTUS_DB"] = prev
+            else:
+                os.environ.pop("PLUTUS_DB", None)
+
+
 if __name__ == "__main__":
     unittest.main()
