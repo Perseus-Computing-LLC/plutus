@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS organizations (
     slug               TEXT UNIQUE NOT NULL,
     tier               TEXT NOT NULL DEFAULT 'free',
     stripe_customer_id TEXT,
+    -- When 1, this org is exempt from the prepaid-credit hard-stop (#28): usage
+    -- is always recorded and may drive the balance negative (track-only mode for
+    -- trusted / internal orgs). 0 = enforce the hard-stop when it's enabled.
+    allow_negative_balance INTEGER NOT NULL DEFAULT 0,
     created_at         REAL NOT NULL
 );
 
@@ -223,11 +227,28 @@ def immediate(conn: sqlite3.Connection):
 def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_money_to_micros(conn)
     conn.executescript(SCHEMA)
+    _migrate_add_columns(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
+
+
+def _migrate_add_columns(conn) -> None:
+    """Idempotently add columns introduced after a table's first release.
+
+    ``CREATE TABLE IF NOT EXISTS`` in SCHEMA is a no-op on an existing table, so
+    new columns need an explicit ``ALTER``. Each entry is added only if absent.
+    """
+    additions = [
+        # (table, column, definition) — #28: per-org hard-stop exemption.
+        ("organizations", "allow_negative_balance", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for table, col, defn in additions:
+        cols = _table_columns(conn, table)
+        if cols and col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
 
 
 def _table_columns(conn, table: str) -> set:
@@ -313,6 +334,13 @@ def list_orgs(conn) -> list[sqlite3.Row]:
 
 def set_org_tier(conn, org_id: str, tier: str) -> None:
     conn.execute("UPDATE organizations SET tier=? WHERE id=?", (tier, org_id))
+    conn.commit()
+
+
+def set_org_allow_negative(conn, org_id: str, allow: bool) -> None:
+    """Toggle the #28 prepaid hard-stop exemption for one org."""
+    conn.execute("UPDATE organizations SET allow_negative_balance=? WHERE id=?",
+                 (1 if allow else 0, org_id))
     conn.commit()
 
 

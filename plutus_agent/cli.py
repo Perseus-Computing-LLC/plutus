@@ -130,8 +130,19 @@ def cmd_org(args):
         _ok(f"organization '{org['name']}' ({org['id']}) on {org['tier']} plan")
     elif args.action == "list":
         for o in db.list_orgs(conn):
+            policy = " ⚠ allow-negative" if o["allow_negative_balance"] else ""
             print(f"  {o['id']}  {o['name']:<24} {o['tier']:<11} "
-                  f"${db.get_balance(conn, o['id']):,.2f}")
+                  f"${db.get_balance(conn, o['id']):,.2f}{policy}")
+    elif args.action in ("allow-negative", "enforce-balance"):
+        org = _resolve_org(conn, args.name)
+        allow = args.action == "allow-negative"
+        db.set_org_allow_negative(conn, org["id"], allow)
+        if allow:
+            _ok(f"'{org['name']}' is now EXEMPT from the prepaid hard-stop "
+                f"(track-only — usage may drive the balance negative)")
+        else:
+            _ok(f"'{org['name']}' now ENFORCES the prepaid hard-stop "
+                f"(usage past a zero balance is rejected when block_over_balance is on)")
     conn.close()
 
 
@@ -418,7 +429,8 @@ def build_parser():
     sub.add_parser("status", help="show orgs, balances, Stripe mode").set_defaults(func=cmd_status)
 
     po = sub.add_parser("org", help="manage organizations")
-    po.add_argument("action", choices=["create", "list"])
+    po.add_argument("action",
+                    choices=["create", "list", "allow-negative", "enforce-balance"])
     po.add_argument("name", nargs="?")
     po.add_argument("--tier", default="free", choices=["free", "pro", "enterprise"])
     po.add_argument("--email")

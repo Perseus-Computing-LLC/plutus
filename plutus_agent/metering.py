@@ -126,9 +126,12 @@ def record_usage(conn, org_id: str, provider: str,
         )
     cost_usd = round(float(cost_usd), 6)
     
-    # Fix #28: prepaid credit hard-stop
+    # Fix #28: prepaid credit hard-stop. Skipped for orgs explicitly flagged
+    # allow_negative_balance (trusted/internal track-only mode) so they keep
+    # full tracking even past zero.
     balance = db.get_balance(conn, org_id)
-    if block_over_balance:
+    exempt = bool(org and org["allow_negative_balance"])
+    if block_over_balance and not exempt:
         # Check if org has ever had credit
         had_credit = conn.execute(
             "SELECT 1 FROM credit_ledger WHERE org_id=? AND kind IN ('topup','grant') LIMIT 1",

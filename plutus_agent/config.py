@@ -94,9 +94,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # (returns a non-recorded result) — off by default so no billing data
         # is ever silently dropped.
         "block_over_free_limit": False,
-        # Prepaid credit hard-stop: when enabled and an org has prepaid credit,
-        # events that would push the balance negative are rejected (not recorded).
-        "block_over_balance": False,
+        # Prepaid credit hard-stop (#28): when enabled and an org has prepaid
+        # credit, events that would push the balance negative are rejected
+        # (not recorded), so a prepaid customer can't consume unbilled service
+        # without limit. ON by default — it only ever affects orgs that have
+        # actually held credit; pure free-tier tracking is never blocked. Set an
+        # individual org's ``allow_negative_balance`` (see `plutus org
+        # allow-negative`) to exempt trusted/internal orgs into track-only mode.
+        "block_over_balance": True,
     },
 }
 
