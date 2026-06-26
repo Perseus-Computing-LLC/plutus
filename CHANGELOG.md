@@ -16,7 +16,8 @@ public launch; that human gate is separate and not flipped here.)
   same-origin checked (Origin/Referer vs `auth.base_url`); logout is now a POST
   (`GET /auth/logout` returns `405`).
 - **Signup abuse controls (#33)** — self-serve signup is rate-limited
-  (5/hour globally) with a per-day org cap.
+  (5/hour, in-memory global). *(Correction, 2026-06-26: the per-day org cap is
+  not yet implemented; tracked in the reopened #33.)*
 - **Report XSS escaping (#34)** — attacker-controlled names (org, keys, periods)
   are HTML-escaped in the dashboard and HTML/PDF reports.
 - **SMTP TLS (#35)** — implicit TLS on port 465 (`SMTP_SSL`) and STARTTLS on
@@ -40,8 +41,10 @@ threaded, connection-per-request server.
   transaction, commit once; no partial batches, no double-count.
 - **Webhook idempotency (#26)** — insert the dedup row first and apply the
   side-effect only if newly inserted, so retried Stripe events can't double-credit.
-- **Concurrency hardening (#30)** — `PRAGMA busy_timeout`, atomic `balance_after`,
-  and a fix for the free-tier quota race.
+- **Concurrency hardening (#30)** — `PRAGMA busy_timeout` + WAL. *(Correction,
+  2026-06-26: the atomic `balance_after` and free-tier quota-race fixes were not
+  fully completed — the ledger read-modify-write is still non-atomic under
+  concurrency; tracked in the reopened #30.)*
 - **Trustworthy credit (#29)** — credit prepaid balance from Stripe's
   `amount_total`, never client-supplied metadata.
 - **Prepaid hard-stop (#28)** — stop debiting past zero; opt-in `402` when a

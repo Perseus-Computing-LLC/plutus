@@ -1,6 +1,6 @@
 # Plutus — Roadmap to 1.0
 
-> Last updated: 2026-06-23 · Current: **v0.5.1** (billing engine; PyPI + GHCR + live at plutus.perseus.observer)
+> Last updated: 2026-06-26 · Current: **v0.7.0** (billing engine; PyPI + GHCR + live at plutus.perseus.observer)
 > This is the **billing-engine** roadmap. The older `ROADMAP.md` is the long-term monitor/FinOps vision.
 
 ## What 1.0 means
@@ -18,7 +18,7 @@ We do **not** call it 1.0 until the money-correctness and public-exposure items 
 
 ## Milestones
 
-### v0.6 — Money & concurrency correctness  *(1.0 blocker)*
+### v0.6 — Money & concurrency correctness  *(shipped v0.6.0, 2026-06-24 — partial; see v0.7.1 carryover)*
 The deep-review findings that can corrupt billing data. Root cause for most: read-modify-write with no atomic transaction under the threaded, connection-per-request server.
 - **#27** make `/v1/usage` atomic per request (validate-all → one transaction → commit once)
 - **#26** webhook idempotency: insert the dedup row *first*, apply side-effect only if newly inserted
@@ -26,9 +26,10 @@ The deep-review findings that can corrupt billing data. Root cause for most: rea
 - **#29** credit from Stripe `amount_total`, never client metadata
 - **#28** prepaid-credit hard-stop policy (stop debiting past zero; opt-in 402)
 - **#38** store money as integer micro-dollars (schema migration) — do before freeze
+- *Status (verified 2026-06-26):* ✅ #26, #27, #29, #38 landed. ⚠️ #30 partial (only `busy_timeout`/WAL landed; `balance_after` still non-atomic + quota race remains) and #28 partial (hard-stop is off-by-default and racy) — both carried to **v0.7.1**.
 - *Exit:* a concurrency/load test on the ingest + webhook paths proves no double-count, no lost writes, correct balances.
 
-### v0.7 — Security hardening  *(1.0 blocker — gates public launch)*
+### v0.7 — Security hardening  *(shipped v0.7.0, 2026-06-24 — partial; see v0.7.1 carryover)*
 - **#31** request body-size cap on `/v1/usage` + `/webhook/stripe` (DoS)
 - **#32** CSRF tokens on state-changing POSTs; make logout a POST
 - **#33** signup rate limiting + per-day org cap (abuse)
@@ -36,7 +37,19 @@ The deep-review findings that can corrupt billing data. Root cause for most: rea
 - **#35** SMTP: TLS-only login, 465 support
 - **#36** OIDC JWKS signature verification (defense-in-depth)
 - **#37** polish punch-list (error-leak, 404 escaping, hook backup, etc.)
+- *Status (verified 2026-06-26):* ✅ #31, #34, #35, #36 landed. ⚠️ #32 (CSRF fails open when `base_url` unset / auth off), #33 (no DB-backed per-day org cap; only an in-memory hourly limiter), #37 (500 error-leak + 404 reflected-XSS) partial — carried to **v0.7.1**.
 - *Exit:* an external security-review pass on the public surface.
+
+### v0.7.1 — Foundation hardening  *(carryover + hygiene; precondition to v0.8)*
+A 2026-06-26 foundation review verified v0.6/v0.7 against `main`. Most fixes landed; the items below were closed but only partially resolved, plus new hygiene gaps. Close these before the v0.8 feature work — 1.0 is the convergence gate for Perseus/Mimir, so the contract must be honest and stable first.
+- **#28** prepaid hard-stop: default-on for prepaid orgs + enforce *inside* the debit transaction (currently off-by-default and racy).
+- **#30** atomic `balance_after` + free-tier quota race: wrap the ledger read-modify-write in `BEGIN IMMEDIATE` (or one conditional `INSERT…SELECT`).
+- **#32** CSRF: fail closed in `_same_origin` when `base_url` is unset, and/or add a per-session token.
+- **#33** DB-backed per-day org-creation cap alongside the hourly limiter.
+- **#37** stop leaking `str(e)` to clients on 500s; escape the 404 `path`; gate the OIDC `"hdr"` test-bypass behind an explicit flag.
+- **#47** `plutus --db` crash (`os` not imported in `cli.py`).
+- **#48** add `windows-latest`/`macos-latest` CI; align the Python matrix with the classifiers (3.10/3.13); fix the `release.yml` double-publish trigger; drop stale `assets/` packaging.
+- *Exit:* every reopened/new issue above closed; a concurrency test covers the #28/#30 transaction; CI green on Linux + Windows across the advertised Python versions.
 
 ### v0.8 — Product completeness  *(what makes it sell)*
 - **Team tier (~$149/mo)** — multi-seat, more workspaces, the missing money tier (drives ramen MRR).
@@ -79,12 +92,12 @@ Already done: README reframed, `pip install plutus-agent`, GHCR image, hosted da
 ## Success metrics for 1.0
 | Metric | Now | 1.0 target |
 |---|---|---|
-| Money-correctness bugs (open) | 5 | 0 |
-| Public-surface security findings (open) | 7 | 0 |
+| Money-correctness bugs (open) | 2 (#28, #30) | 0 |
+| Public-surface security findings (open) | 3 (#32, #33, #37) | 0 |
 | Paying orgs | 1 (us) | 10+ |
 | First-class integrations | adapters + hook | + LangChain, CrewAI, MCP |
 | API stability | unfrozen | frozen, semver |
 | Docs | README + 3 docs | full reference + guides |
 
 ## Sequencing note
-v0.6 and v0.7 are the 1.0 blockers and should land before any public push — they're tracked as issues #26–#38. v0.8 (Team tier + integrations) can proceed in parallel since it's the revenue/distribution lever from the profitability plan. The fastest credible path: **v0.6 money-correctness as one focused sprint (it's mostly one transaction-shaped fix), then v0.7 security, launching as v0.7 ships and tagging 1.0 once v0.8 + docs settle.**
+v0.6 and v0.7 **shipped** (0.6.0 / 0.7.0), but the 2026-06-26 review surfaced partial fixes + hygiene gaps now collected in **v0.7.1 — Foundation hardening**. Close v0.7.1 before any public push and before wiring Plutus into Perseus/Mimir (the convergence-gated-on-1.0 decision). v0.8 (Team tier + integrations) is the revenue/distribution lever and can proceed in parallel, but the 1.0 tag waits on v0.7.1 + an external security-review pass + a frozen API/schema.
