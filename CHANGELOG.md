@@ -4,6 +4,16 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Batch `/v1/usage` no longer hides prepaid-hard-stop rejections (#62).** The
+  multi-event summary reported only the free-tier `blocked` count;
+  `over_balance` rejections were absent, so a prepaid org past zero credit could
+  get a `200` with events silently dropped. The summary now carries
+  `over_balance_blocked`, `free_limit_blocked`, and a `blocked` total covering
+  both reasons, and the endpoint returns `402` whenever *nothing* landed —
+  including a batch split across both rejection reasons (previously it only 402'd
+  when a single reason accounted for the whole batch).
+
 ### Added
 - **Stripe refunds, disputes, and failed payments now reverse the ledger
   (#60).** The webhook handler previously ignored every reversal event, so a

@@ -467,22 +467,33 @@ class Handler(BaseHTTPRequestHandler):
             "tracked_limit": st["tracked_limit"],
             "tier": st["tier"],
         }
+        n_recorded = len(out) - n_blocked - n_over_balance
         if len(out) == 1:
             body.update(out[0])
         else:
             body["results"] = out
-            body["recorded"] = len(out) - n_blocked - n_over_balance
-            body["blocked"] = n_blocked
-        
-        # 402 when nothing landed (either free quota exhausted or balance exhausted)
-        if n_blocked == len(out):
+            body["recorded"] = n_recorded
+            # Fix #62: surface BOTH rejection reasons. `blocked` is the *total*
+            # so a 200 is never mistaken for "all recorded"; the breakdown
+            # distinguishes free-tier quota from the prepaid hard-stop, which a
+            # reconciler / SDK needs to act on a partially-rejected batch.
+            body["blocked"] = n_blocked + n_over_balance
+            body["free_limit_blocked"] = n_blocked
+            body["over_balance_blocked"] = n_over_balance
+
+        # 402 whenever NOTHING landed, regardless of the mix of reasons. Fix #62:
+        # previously this only fired when a *single* reason accounted for the
+        # whole batch, so a batch split across both reasons (e.g. 60 over-balance
+        # + 40 over-quota) slipped through as a 200 with everything rejected.
+        if n_recorded == 0:
             base = (cfg.get("auth", {}).get("base_url") or "").rstrip("/")
-            body["error"] = "free-tier token quota reached — upgrade to Pro"
-            body["upgrade_url"] = (base + "/pricing") if base else "/pricing"
-            return self._json(402, body)
-        if n_over_balance == len(out):
-            base = (cfg.get("auth", {}).get("base_url") or "").rstrip("/")
-            body["error"] = "prepaid credit exhausted"
+            if n_over_balance and not n_blocked:
+                body["error"] = "prepaid credit exhausted"
+            elif n_blocked and not n_over_balance:
+                body["error"] = "free-tier token quota reached — upgrade to Pro"
+            else:
+                body["error"] = ("usage rejected: free-tier quota and prepaid "
+                                 "credit both exhausted")
             body["upgrade_url"] = (base + "/pricing") if base else "/pricing"
             return self._json(402, body)
         return self._json(200, body)
