@@ -4,6 +4,16 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Tests
+- **High-risk auth/tenant coverage (#66, part 3 — closes #66).** Added tests for
+  the previously-untested money/auth paths: the hand-rolled OIDC **RS256 verifier**
+  itself (a real pure-Python RSA-signed token verifies; a tampered payload and a
+  non-RS256 `alg` are rejected — every other auth test had set
+  `allow_unsigned_tokens`, so the signature math was never exercised); the
+  `_authz_org` **cross-tenant `PermissionError`** path; and the
+  `allow_negative_balance` **exemption end-to-end** over HTTP. (The #60/#61/#62
+  coverage landed with those fixes.)
+
 ### Added
 - **Token-scoped admin API (#66, part 2).** A new `/v1/admin/*` surface lets an
   operator script tenant management instead of using the CLI/dashboard only:
