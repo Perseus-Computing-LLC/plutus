@@ -258,9 +258,13 @@ def _alerted_recently(conn, org_id, kind, workspace_id, ts, within=DAY) -> bool:
 
 # ------------------------------------------------------------ aggregation ----
 def _month_floor(ts: float) -> float:
+    # Fix #63: events are stored as UTC epoch, so the month boundary must be
+    # computed in UTC too. Using the server's local tz (naive fromtimestamp +
+    # naive .timestamp()) shifted the free-tier quota reset and every MTD report
+    # by the UTC offset on any non-UTC server.
     import datetime as _dt
-    d = _dt.datetime.fromtimestamp(ts)
-    return _dt.datetime(d.year, d.month, 1).timestamp()
+    d = _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
+    return _dt.datetime(d.year, d.month, 1, tzinfo=_dt.timezone.utc).timestamp()
 
 
 def workspace_mtd_spend(conn, workspace_id: str, now: Optional[float] = None) -> float:

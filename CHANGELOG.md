@@ -5,6 +5,19 @@ All notable changes to Plutus are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **Money-correctness cluster (#63) — four independent fixes:**
+  - **USD-only is enforced.** The credit ledger stores plain USD micro-dollars
+    with no currency dimension, so a non-USD top-up was recorded as the wrong
+    number of dollars. A configured `billing.currency` other than `usd` now
+    raises a clear `BillingError` instead of silently mis-billing.
+  - **`past_due` no longer counts as active Pro.** A subscription in dunning
+    used to retain full Pro for the whole retry window; Pro is now kept only
+    through `active`/`trialing` (Stripe restores Pro on the next `active`).
+  - **Credit checkout amounts are bounded** to a finite $1–$10,000 at the form
+    boundary — `inf`/`nan`/a 9-figure typo previously passed straight to Stripe.
+  - **Month boundaries are computed in UTC**, matching the UTC-epoch event store,
+    so the free-tier quota reset and MTD reports no longer shift by the server's
+    UTC offset on a non-UTC host.
 - **Batch `/v1/usage` no longer hides prepaid-hard-stop rejections (#62).** The
   multi-event summary reported only the free-tier `blocked` count;
   `over_balance` rejections were absent, so a prepaid org past zero credit could

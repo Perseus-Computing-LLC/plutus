@@ -94,6 +94,15 @@ class StripeClient:
                 "No Stripe key configured. Set billing.stripe_secret_key or "
                 "the STRIPE_SECRET_KEY env var."
             )
+        # Fix #63: the credit ledger stores plain USD micro-dollars with no
+        # currency dimension, so a non-USD top-up would be recorded as the wrong
+        # number of dollars. Enforce USD-only rather than silently mis-bill;
+        # multi-currency ledgers are out of scope for 1.0.
+        if self.currency != "usd":
+            raise BillingError(
+                f"Plutus tracks credit in USD only (billing.currency is "
+                f"{self.currency!r}). Set billing.currency to 'usd'."
+            )
 
     # ----------------------------------------------------------- customer ---
     def ensure_customer(self, conn, org_id: str) -> str:
@@ -274,7 +283,11 @@ def _apply_subscription_change(conn, obj) -> dict:
     if not org_id:
         return {"status": "no_org"}
     status = obj.get("status")
-    tier = "pro" if status in ("active", "trialing", "past_due") else "free"
+    # Fix #63: do NOT keep Pro through `past_due`. A customer whose renewal card
+    # fails would otherwise retain full Pro for the entire dunning window. Stripe
+    # restores `active` (→ Pro again) when payment succeeds, and emits
+    # `subscription.deleted` (→ free) when dunning is exhausted.
+    tier = "pro" if status in ("active", "trialing") else "free"
     db.set_org_tier(conn, org_id, tier)
     return {"status": "tier_set", "org_id": org_id, "tier": tier,
             "subscription_status": status}
