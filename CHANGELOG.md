@@ -4,6 +4,16 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Self-serve spend export + cursor pagination (#66, part 1).** New
+  `GET /v1/usage/export.csv` and `export.json` (Bearer-authenticated, org-scoped,
+  optional `?since`/`?until` epoch bounds) let a customer pull their own usage
+  for their books. List endpoints now paginate with a `?limit&before=<_rowid>`
+  cursor: new `GET /api/ledger` and `GET /api/events` return `{items,
+  next_before, limit}`, and `GET /api/orgs` accepts `?limit&offset`. The
+  underlying `db.ledger_history` / `metering.recent_events` gained a `before`
+  cursor.
+
 ### Security
 - **`/v1/usage` ingest hardening (#65).**
   - **Idempotency-Key.** A retried or duplicated POST used to double-count usage

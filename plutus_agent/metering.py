@@ -399,13 +399,20 @@ def tier_status(conn, org_id: str, now: Optional[float] = None) -> dict:
     }
 
 
-def recent_events(conn, org_id: str, limit: int = 25) -> list[dict]:
-    rows = conn.execute(
-        "SELECT ue.*, w.name AS workspace_name FROM usage_events ue "
-        "LEFT JOIN workspaces w ON w.id=ue.workspace_id "
-        "WHERE ue.org_id=? ORDER BY ue.ts DESC LIMIT ?",
-        (org_id, limit),
-    ).fetchall()
+def recent_events(conn, org_id: str, limit: int = 25,
+                  before: Optional[int] = None) -> list[dict]:
+    """Most-recent usage events, newest first. Fix #66: pass ``before`` (the
+    ``_rowid`` of the last row from the previous page) for cursor pagination."""
+    sql = ("SELECT ue.rowid AS _rowid, ue.*, w.name AS workspace_name "
+           "FROM usage_events ue LEFT JOIN workspaces w ON w.id=ue.workspace_id "
+           "WHERE ue.org_id=?")
+    args: list = [org_id]
+    if before is not None:
+        sql += " AND ue.rowid < ?"
+        args.append(int(before))
+    sql += " ORDER BY ue.ts DESC, ue.rowid DESC LIMIT ?"
+    args.append(int(limit))
+    rows = conn.execute(sql, args).fetchall()
     out = []
     for r in rows:
         d = dict(r)
