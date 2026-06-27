@@ -17,8 +17,15 @@ Two purchase paths:
   the configured Price. Subscription lifecycle webhooks move the org between the
   ``pro`` and ``free`` tiers.
 
+Refunds and chargebacks reverse the ledger (fix #60): ``charge.refunded`` posts
+a negative ``refund`` entry and ``charge.dispute.*`` a negative ``adjust``, each
+converging to the charge's cumulative refunded / the disputed amount so partial,
+repeated, or replayed events never double-reverse. ``invoice.payment_failed`` is
+recorded as a dunning alert.
+
 Webhook handling is **idempotent**: every event id is recorded in
-``stripe_events`` and never applied twice.
+``stripe_events`` and never applied twice, and reversals additionally converge to
+a target amount per Stripe reference as a second layer of protection.
 """
 from __future__ import annotations
 
@@ -203,6 +210,13 @@ def handle_webhook_event(conn, event: dict) -> dict:
             result = _apply_subscription_change(conn, obj)
         elif etype == "customer.subscription.deleted":
             result = _apply_subscription_deleted(conn, obj)
+        # Fix #60: reverse the ledger when money goes back to the customer.
+        elif etype == "charge.refunded":
+            result = _apply_charge_refunded(conn, obj)
+        elif etype in ("charge.dispute.created", "charge.dispute.funds_withdrawn"):
+            result = _apply_dispute(conn, obj)
+        elif etype == "invoice.payment_failed":
+            result = _apply_payment_failed(conn, obj)
     except Exception:
         # Rollback the event claim so it can be retried
         if event_id:
@@ -241,8 +255,12 @@ def _apply_checkout_completed(conn, obj) -> dict:
         else:
             amount = meta.get("amount_usd")
             usd = float(amount) if amount is not None else 0.0
+        # Fix #60: key the top-up on the PaymentIntent when present (falling back
+        # to the session id) so a later refund/dispute — which carries the
+        # PaymentIntent but not always the customer — can be mapped back to it.
+        ref = obj.get("payment_intent") or obj.get("id")
         row = db.add_ledger(conn, org_id, usd, "topup",
-                            reason="Stripe checkout", stripe_ref=obj.get("id"))
+                            reason="Stripe checkout", stripe_ref=ref)
         return {"status": "credited", "org_id": org_id, "amount_usd": usd,
                 "balance_after": float(row["balance_after"])}
     if kind == "subscription" or obj.get("mode") == "subscription":
@@ -268,3 +286,82 @@ def _apply_subscription_deleted(conn, obj) -> dict:
         return {"status": "no_org"}
     db.set_org_tier(conn, org_id, "free")
     return {"status": "downgraded", "org_id": org_id, "tier": "free"}
+
+
+# ----------------------------------------------------------------- reversals ---
+def _org_from_reversal(conn, obj) -> Optional[str]:
+    """Map a refund/dispute back to its org.
+
+    Charges carry ``customer`` (and sometimes our metadata); disputes carry
+    neither, only the ``payment_intent``, so fall back to the PaymentIntent id
+    stored on the original top-up (fix #60).
+    """
+    org_id = _org_from_metadata_or_customer(conn, obj)
+    if org_id:
+        return org_id
+    return db.org_by_topup_ref(conn, obj.get("payment_intent"))
+
+
+def _reverse(conn, org_id: str, ref: str, target_reversed_usd: float,
+             kind: str, reason: str):
+    """Post a negative ledger entry so the cumulative amount reversed for ``ref``
+    reaches ``target_reversed_usd``. Idempotent across partial/repeat events:
+    only the still-outstanding delta is posted, and nothing when already met.
+    Returns ``(row, delta_usd)`` or ``None`` when there is nothing to reverse.
+    """
+    already = db.reversed_for_ref(conn, org_id, ref)
+    delta = round(max(0.0, target_reversed_usd) - already, 6)
+    if delta <= 0:
+        return None
+    row = db.add_ledger(conn, org_id, -delta, kind, reason=reason, stripe_ref=ref)
+    return row, delta
+
+
+def _apply_charge_refunded(conn, obj) -> dict:
+    """``charge.refunded``: reverse credit by the charge's cumulative refund.
+
+    ``amount_refunded`` is cumulative for the charge, so converging to it keyed
+    by the charge id handles partial-then-full and repeated refunds correctly.
+    """
+    org_id = _org_from_reversal(conn, obj)
+    if not org_id:
+        return {"status": "no_org", "detail": "could not map refund to an org"}
+    charge_id = obj.get("id") or ""
+    refunded = float(obj.get("amount_refunded") or 0) / 100.0
+    out = _reverse(conn, org_id, charge_id, refunded, "refund", reason="Stripe refund")
+    if out is None:
+        return {"status": "noop", "org_id": org_id, "detail": "already reversed"}
+    row, delta = out
+    return {"status": "refunded", "org_id": org_id, "amount_usd": delta,
+            "balance_after": float(row["balance_after"])}
+
+
+def _apply_dispute(conn, obj) -> dict:
+    """``charge.dispute.created`` / ``...funds_withdrawn``: reverse the disputed
+    amount once. Both events for one dispute converge to the same target keyed by
+    the dispute id, so the chargeback debits the ledger exactly once.
+    """
+    org_id = _org_from_reversal(conn, obj)
+    if not org_id:
+        return {"status": "no_org", "detail": "could not map dispute to an org"}
+    dispute_id = obj.get("id") or ""
+    amount = float(obj.get("amount") or 0) / 100.0
+    out = _reverse(conn, org_id, dispute_id, amount, "adjust",
+                   reason="Stripe dispute/chargeback")
+    if out is None:
+        return {"status": "noop", "org_id": org_id, "detail": "already reversed"}
+    row, delta = out
+    return {"status": "disputed", "org_id": org_id, "amount_usd": delta,
+            "balance_after": float(row["balance_after"])}
+
+
+def _apply_payment_failed(conn, obj) -> dict:
+    """``invoice.payment_failed``: surface dunning as an alert. Tier/past_due
+    policy lives in issue #63; here we only record the signal so it isn't lost.
+    """
+    org_id = _org_from_metadata_or_customer(conn, obj)
+    if not org_id:
+        return {"status": "no_org"}
+    db.log_alert(conn, org_id, "payment_failed",
+                 "Stripe reported a failed invoice payment.")
+    return {"status": "payment_failed", "org_id": org_id}

@@ -654,6 +654,40 @@ def ledger_history(conn, org_id: str, limit: int = 50) -> list[dict]:
     return [_ledger_row_with_usd(r) for r in rows]
 
 
+def reversed_for_ref(conn, org_id: str, stripe_ref: str) -> float:
+    """USD already reversed (``refund``/``adjust``) against a Stripe reference.
+
+    Returned as a positive amount. Fix #60: refund/dispute webhook handlers use
+    this to make a reversal *converge* to a target cumulative amount, so a
+    partial-then-full refund, a dispute fired twice (created + funds_withdrawn),
+    or a replayed event can never double-reverse the ledger.
+    """
+    if not stripe_ref:
+        return 0.0
+    row = conn.execute(
+        "SELECT COALESCE(SUM(delta_micros),0) m FROM credit_ledger "
+        "WHERE org_id=? AND stripe_ref=? AND kind IN ('refund','adjust')",
+        (org_id, stripe_ref),
+    ).fetchone()
+    return -micros_to_usd(int(row["m"]))  # stored deltas are negative; report positive
+
+
+def org_by_topup_ref(conn, stripe_ref: str) -> Optional[str]:
+    """Org credited by a ``topup``/``grant`` keyed by this Stripe reference.
+
+    Fix #60: a dispute object carries no ``customer``, so we map it back to its
+    org via the PaymentIntent id stored on the original top-up's ``stripe_ref``.
+    """
+    if not stripe_ref:
+        return None
+    row = conn.execute(
+        "SELECT org_id FROM credit_ledger WHERE stripe_ref=? "
+        "AND kind IN ('topup','grant') ORDER BY ts LIMIT 1",
+        (stripe_ref,),
+    ).fetchone()
+    return row["org_id"] if row else None
+
+
 # ------------------------------------------------------------- stripe idemp ---
 def stripe_event_seen(conn, event_id: str) -> bool:
     return conn.execute(
