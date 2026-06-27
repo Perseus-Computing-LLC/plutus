@@ -1,7 +1,17 @@
 # Plutus — Roadmap to 1.0
 
-> Last updated: 2026-06-26 · Current: **v0.7.0** (billing engine; PyPI + GHCR + live at plutus.perseus.observer)
+> Last updated: 2026-06-27 · Current: **1.0.0 (code-frozen; tag/publish pending)**
 > This is the **billing-engine** roadmap. The older `ROADMAP.md` is the long-term monitor/FinOps vision.
+
+> **2026-06-27 status:** the 1.0 blocker queue (#60–#66) plus the low-sev
+> follow-ups (#56–#59) and the pre-1.0 security-review fixes (#80) are all merged
+> to `main`; the `/v1` OpenAPI spec + DB forward-compat policy are published; the
+> version is bumped to 1.0.0. The authoritative changelog is the `[1.0.0]` section
+> of [`CHANGELOG.md`](CHANGELOG.md) and the roadmap issue
+> [#67](https://github.com/Perseus-Computing-LLC/plutus/issues/67). **Remaining
+> gates (human/outward):** push the `v1.0.0` tag (publishes to PyPI + GHCR) and an
+> external security-review pass before public launch. The milestone framing below
+> predates the issue-numbered queue and is kept for historical context.
 
 ## What 1.0 means
 

@@ -4,6 +4,18 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-27
+
+**Plutus 1.0 — the billing loop is closed and the contract is frozen.** The
+ledger is now an auditable mirror of Stripe (refunds, disputes, and failed
+payments reverse it idempotently); every money- and quota-bearing input is
+guarded; ingest and auth are hardened; self-serve export and a token-scoped admin
+API are in; and the `/v1` OpenAPI spec plus the DB forward-compatibility policy
+are published as the frozen contract Perseus and Mimir build against. An internal
+security review (documented in `docs/security-review-2026-06-27.md`) cleared the
+money/auth/tenant surfaces; an external review remains the gate before any public
+launch.
+
 ### Fixed
 - **Orphaned in-flight Idempotency-Key no longer 409s forever (review F3, #80).**
   If a request crashed between claiming an `Idempotency-Key` and storing its
@@ -25,6 +37,12 @@ All notable changes to Plutus are documented here.
   version.
 
 ### Security
+- **Negative token counts can no longer rewind the free-tier meter (#80).** The
+  `/v1/usage` boundary validated only that token fields coerce to int, so a
+  negative `input_tokens` (with a non-negative `cost_usd`, dodging the #61 guard)
+  rewound `tracked_tokens_mtd` — bypassing the Free-tier quota — and corrupted
+  `SUM(tokens)` aggregates. Negatives are now rejected with a `400` at the
+  boundary and a `ValueError` in `record_usage`.
 - **CSRF synchronizer token as defense-in-depth (#58).** State-changing
   dashboard POSTs now accept a per-session CSRF token in addition to the existing
   fail-closed Origin/Referer check: a request passes if it is same-origin **or**
