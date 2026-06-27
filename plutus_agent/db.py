@@ -338,8 +338,14 @@ def get_org_by_slug(conn, slug: str) -> Optional[sqlite3.Row]:
     return conn.execute("SELECT * FROM organizations WHERE slug=?", (slug,)).fetchone()
 
 
-def list_orgs(conn) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM organizations ORDER BY created_at").fetchall()
+def list_orgs(conn, limit: Optional[int] = None, offset: int = 0) -> list[sqlite3.Row]:
+    """All orgs, oldest first. Fix #66: optional ``limit``/``offset`` paging."""
+    sql = "SELECT * FROM organizations ORDER BY created_at"
+    args: list = []
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        args += [int(limit), int(offset)]
+    return conn.execute(sql, args).fetchall()
 
 
 def count_orgs_created_since(conn, since_ts: float) -> int:
@@ -656,12 +662,47 @@ def get_ledger_entry(conn, ledger_id: str) -> Optional[dict]:
     return _ledger_row_with_usd(row)
 
 
-def ledger_history(conn, org_id: str, limit: int = 50) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM credit_ledger WHERE org_id=? ORDER BY ts DESC, rowid DESC LIMIT ?",
-        (org_id, limit),
-    ).fetchall()
+def ledger_history(conn, org_id: str, limit: int = 50,
+                   before: Optional[int] = None) -> list[dict]:
+    """Most-recent ledger entries, newest first. Fix #66: pass ``before`` (the
+    ``_rowid`` of the last row from the previous page) for cursor pagination."""
+    sql = "SELECT rowid AS _rowid, * FROM credit_ledger WHERE org_id=?"
+    args: list = [org_id]
+    if before is not None:
+        sql += " AND rowid < ?"
+        args.append(int(before))
+    sql += " ORDER BY ts DESC, rowid DESC LIMIT ?"
+    args.append(int(limit))
+    rows = conn.execute(sql, args).fetchall()
     return [_ledger_row_with_usd(r) for r in rows]
+
+
+def export_events(conn, org_id: str, since: Optional[float] = None,
+                  until: Optional[float] = None, limit: int = 50_000) -> list[dict]:
+    """Org-scoped usage events for CSV/JSON export (fix #66), newest first,
+    optionally bounded by [since, until) epoch seconds. ``limit`` caps the rows
+    returned so an export can't exhaust memory."""
+    sql = ("SELECT ue.id, ue.ts, ue.provider, ue.model, ue.task_type, "
+           "w.name AS workspace, ue.input_tokens, ue.output_tokens, "
+           "ue.cache_read_tokens, ue.reasoning_tokens, ue.cost_micros, "
+           "ue.estimated, ue.source FROM usage_events ue "
+           "LEFT JOIN workspaces w ON w.id=ue.workspace_id WHERE ue.org_id=?")
+    args: list = [org_id]
+    if since is not None:
+        sql += " AND ue.ts >= ?"
+        args.append(float(since))
+    if until is not None:
+        sql += " AND ue.ts < ?"
+        args.append(float(until))
+    sql += " ORDER BY ue.ts DESC, ue.rowid DESC LIMIT ?"
+    args.append(int(limit))
+    out = []
+    for r in conn.execute(sql, args).fetchall():
+        d = dict(r)
+        d["cost_usd"] = micros_to_usd(int(d.pop("cost_micros")))
+        d["estimated"] = bool(d["estimated"])
+        out.append(d)
+    return out
 
 
 def reversed_for_ref(conn, org_id: str, stripe_ref: str) -> float:

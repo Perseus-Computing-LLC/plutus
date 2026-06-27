@@ -25,6 +25,7 @@ from . import api, views, auth as authmod
 # Paths reachable without a session when auth is enabled.
 _PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe", "/pricing",
                  "/v1/usage",  # authenticated by its own Bearer API key, not a session
+                 "/v1/usage/export.csv", "/v1/usage/export.json",  # Bearer-auth (#66)
                  "/auth/login", "/auth/callback", "/auth/logout"}
 
 # Max request body size (1 MiB) — protects /v1/usage and /webhook/stripe from DoS
@@ -49,6 +50,28 @@ def _parse_credit_amount(raw) -> float:
             f"amount must be between ${CREDIT_MIN_USD:,.0f} and ${CREDIT_MAX_USD:,.0f}"
         )
     return amount
+
+
+def _qs_int(q: dict, name: str, default, lo: int, hi: int):
+    """Parse a bounded integer query param (parse_qs dict). Returns ``default``
+    when absent or unparseable; clamps into [lo, hi] otherwise (fix #66)."""
+    raw = (q.get(name) or [None])[0]
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(lo, min(hi, int(raw)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _qs_float(q: dict, name: str):
+    raw = (q.get(name) or [None])[0]
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 class _BodyTooLarge(Exception):
@@ -298,12 +321,31 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/pricing":
                 return self._pricing(conn)
             if path == "/api/orgs":
-                return self._json(200, api.orgs_json(conn, self._scoped_orgs(conn)))
+                limit = _qs_int(q, "limit", None, lo=1, hi=1000)
+                offset = _qs_int(q, "offset", 0, lo=0, hi=10_000_000) or 0
+                return self._json(200, api.orgs_json(
+                    conn, self._scoped_orgs(conn), limit=limit, offset=offset))
             if path == "/api/summary":
                 org_id = self._authz_org(conn, q.get("org", [None])[0])
                 if not org_id:
                     return self._json(404, {"error": "no organizations"})
                 return self._json(200, api.summary_json(conn, org_id))
+            if path == "/api/ledger":
+                org_id = self._authz_org(conn, q.get("org", [None])[0])
+                if not org_id:
+                    return self._json(404, {"error": "no organizations"})
+                return self._json(200, api.ledger_json(
+                    conn, org_id, limit=_qs_int(q, "limit", 50, lo=1, hi=500),
+                    before=_qs_int(q, "before", None, lo=1, hi=2**63 - 1)))
+            if path == "/api/events":
+                org_id = self._authz_org(conn, q.get("org", [None])[0])
+                if not org_id:
+                    return self._json(404, {"error": "no organizations"})
+                return self._json(200, api.events_json(
+                    conn, org_id, limit=_qs_int(q, "limit", 50, lo=1, hi=500),
+                    before=_qs_int(q, "before", None, lo=1, hi=2**63 - 1)))
+            if path in ("/v1/usage/export.csv", "/v1/usage/export.json"):
+                return self._usage_export(conn, path, q)
             if path in ("/billing/success", "/billing/cancel"):
                 ok = path.endswith("success")
                 return self._send(200, views.simple_page(
@@ -419,6 +461,19 @@ class Handler(BaseHTTPRequestHandler):
         if h[:7].lower() != "bearer ":
             return None
         return db.api_key_org(conn, h[7:].strip())
+
+    def _usage_export(self, conn, path, q):
+        """GET /v1/usage/export.csv|json — org-scoped spend export (#66), Bearer-
+        authenticated like /v1/usage. Optional ?since & ?until epoch bounds."""
+        org_id = self._bearer_org(conn)
+        if not org_id:
+            return self._json(401, {"error": "invalid or missing API key"})
+        since, until = _qs_float(q, "since"), _qs_float(q, "until")
+        if path.endswith(".json"):
+            return self._json(200, api.export_json(conn, org_id, since, until))
+        csv_text = api.export_csv(conn, org_id, since, until)
+        return self._send(200, csv_text, "text/csv; charset=utf-8",
+                          {"Content-Disposition": 'attachment; filename="usage.csv"'})
 
     def _ingest_usage(self, conn):
         """POST /v1/usage — meter one event (or a JSON array of them) via API key.
