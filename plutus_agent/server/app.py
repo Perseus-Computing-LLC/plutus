@@ -555,12 +555,15 @@ class Handler(BaseHTTPRequestHandler):
         for ev in events:
             if not isinstance(ev, dict) or not ev.get("provider"):
                 return self._json(400, {"error": "each event needs a 'provider'"})
-            # Validate int fields can coerce
+            # Validate int fields coerce AND are non-negative. Fix #80: a negative
+            # token count would rewind tracked_tokens_mtd (bypassing the free-tier
+            # quota) and corrupt every SUM(tokens) aggregate — the token-count
+            # sibling of the #61 negative-cost_usd guard.
             try:
-                int(ev.get("input_tokens", 0) or 0)
-                int(ev.get("output_tokens", 0) or 0)
-                int(ev.get("cache_read_tokens", 0) or 0)
-                int(ev.get("reasoning_tokens", 0) or 0)
+                if any(int(ev.get(f, 0) or 0) < 0 for f in (
+                        "input_tokens", "output_tokens",
+                        "cache_read_tokens", "reasoning_tokens")):
+                    return self._json(400, {"error": "token fields must be non-negative"})
             except (TypeError, ValueError):
                 return self._json(400, {"error": "token fields must be integers"})
             # Fix #61: reject a negative (or non-numeric) cost_usd before it can
