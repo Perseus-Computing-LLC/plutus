@@ -1,0 +1,399 @@
+openapi: 3.1.0
+info:
+  title: Plutus /v1 API
+  version: "1.0.0"
+  description: |
+    The Plutus `/v1` HTTP API — usage ingest, spend export, and operator admin
+    for the self-hostable LLM-spend billing engine.
+
+    **This document is the frozen 1.0 contract.** Perseus and Mimir build against
+    it; within the 1.0 major line it changes only additively (new optional fields,
+    new endpoints). Breaking changes require a `/v2`. See `docs/SCHEMA.md` for the
+    paired database forward-compatibility policy.
+
+    ## Authentication
+    Three independent schemes, by path:
+    - **`/v1/usage*`** — a per-org **API key** as `Authorization: Bearer plutus_sk_…`
+      (minted in the dashboard or via the admin API).
+    - **`/v1/admin/*`** — the single operator **admin token** as
+      `Authorization: Bearer <admin token>` (config `admin.token` /
+      `PLUTUS_ADMIN_TOKEN`). Disabled (404) when no token is configured.
+    - The dashboard and `/webhook/stripe` use session cookies and Stripe
+      signatures respectively and are out of scope for `/v1`.
+
+    All monetary values are **USD** (the ledger is USD-only). Timestamps are
+    **Unix epoch seconds (UTC)**.
+servers:
+  - url: /
+    description: The Plutus server origin (default http://127.0.0.1:8420).
+
+tags:
+  - name: usage
+    description: Usage ingest and export (per-org API key).
+  - name: admin
+    description: Operator tenant management (admin token).
+
+paths:
+  /v1/usage:
+    post:
+      tags: [usage]
+      summary: Meter one usage event or a batch.
+      description: |
+        Record one event (a JSON object) or a batch (a JSON array, 1–1000
+        events) against the authenticated org. The whole batch is recorded in one
+        serialized transaction (all-or-nothing on error).
+
+        Supply an exact `cost_usd` for billing-grade accuracy; omit it to have the
+        cost estimated from token counts (the result is flagged `unpriced` when no
+        exact model price exists). A negative `cost_usd` is rejected (`400`).
+
+        **Idempotency:** send an `Idempotency-Key` header to make retries safe —
+        a duplicate replays the original response (`idempotent_replay: true`)
+        instead of re-recording.
+      security:
+        - apiKey: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/UsageEvent'
+                - type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: { $ref: '#/components/schemas/UsageEvent' }
+      responses:
+        '200':
+          description: |
+            Recorded. A single-event request returns the event result fields
+            inline; a batch returns `results[]` plus block counts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsageResponse' }
+        '400':
+          description: Malformed body, missing `provider`, non-integer token field, or a negative/non-numeric `cost_usd`.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402':
+          description: Nothing landed — the free-tier quota and/or prepaid credit is exhausted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/UsageResponse'
+                  - type: object
+                    properties:
+                      error: { type: string }
+                      upgrade_url: { type: string }
+        '413': { description: Request body exceeds 1 MiB. }
+        '429':
+          description: Per-key rate limit exceeded.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: A request with the same `Idempotency-Key` is still in flight.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /v1/usage/export.csv:
+    get:
+      tags: [usage]
+      summary: Export this org's usage events as CSV.
+      security:
+        - apiKey: []
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+      responses:
+        '200':
+          description: CSV with a header row, newest first.
+          content:
+            text/csv:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/usage/export.json:
+    get:
+      tags: [usage]
+      summary: Export this org's usage events as JSON.
+      security:
+        - apiKey: []
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+      responses:
+        '200':
+          description: Org-scoped events, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  org_id: { type: string }
+                  count: { type: integer }
+                  events:
+                    type: array
+                    items: { $ref: '#/components/schemas/ExportedEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/admin/orgs:
+    get:
+      tags: [admin]
+      summary: List organizations.
+      security: [{ adminToken: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200':
+          description: Organizations.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orgs:
+                    type: array
+                    items: { $ref: '#/components/schemas/Org' }
+        '401': { $ref: '#/components/responses/AdminUnauthorized' }
+        '404': { $ref: '#/components/responses/AdminDisabled' }
+    post:
+      tags: [admin]
+      summary: Create an organization.
+      security: [{ adminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                tier: { $ref: '#/components/schemas/Tier' }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Org' } } }
+        '400': { description: Missing name or invalid tier. }
+        '401': { $ref: '#/components/responses/AdminUnauthorized' }
+        '404': { $ref: '#/components/responses/AdminDisabled' }
+
+  /v1/admin/credits:
+    post:
+      tags: [admin]
+      summary: Post a credit grant or adjustment.
+      description: |
+        Append a `grant` (must be positive) or an `adjust` (any non-zero finite
+        amount, positive or negative) to an org's ledger. Use `adjust` to debit;
+        metered debits never come through here.
+      security: [{ adminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org_id, amount_usd]
+              properties:
+                org_id: { type: string }
+                amount_usd: { type: number, description: "Non-zero, finite. Must be > 0 when kind=grant." }
+                kind: { type: string, enum: [grant, adjust], default: grant }
+                reason: { type: string }
+      responses:
+        '201':
+          description: Posted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  org_id: { type: string }
+                  kind: { type: string }
+                  amount_usd: { type: number }
+                  balance_after: { type: number }
+        '400': { description: Bad kind, non-finite/zero amount, or a negative grant. }
+        '401': { $ref: '#/components/responses/AdminUnauthorized' }
+        '404': { description: Unknown org, or admin API disabled. }
+
+  /v1/admin/keys:
+    get:
+      tags: [admin]
+      summary: List an org's API keys (secrets never returned).
+      security: [{ adminToken: [] }]
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Keys (metadata only).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  org_id: { type: string }
+                  keys:
+                    type: array
+                    items: { $ref: '#/components/schemas/ApiKeyInfo' }
+        '401': { $ref: '#/components/responses/AdminUnauthorized' }
+        '404': { description: Unknown org, or admin API disabled. }
+    post:
+      tags: [admin]
+      summary: Mint an API key (secret returned once).
+      security: [{ adminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org_id]
+              properties:
+                org_id: { type: string }
+                name: { type: string }
+      responses:
+        '201':
+          description: Created. The `secret` is shown once and is unrecoverable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  org_id: { type: string }
+                  name: { type: string, nullable: true }
+                  secret: { type: string }
+        '401': { $ref: '#/components/responses/AdminUnauthorized' }
+        '404': { description: Unknown org, or admin API disabled. }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: A per-org API key (`plutus_sk_…`).
+    adminToken:
+      type: http
+      scheme: bearer
+      description: The operator admin token (`admin.token` / `PLUTUS_ADMIN_TOKEN`).
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+      description: Opt-in retry-safety key, scoped per org.
+    Since:
+      name: since
+      in: query
+      required: false
+      schema: { type: number }
+      description: Lower bound (inclusive) on event timestamp, epoch seconds.
+    Until:
+      name: until
+      in: query
+      required: false
+      schema: { type: number }
+      description: Upper bound (exclusive) on event timestamp, epoch seconds.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    AdminUnauthorized:
+      description: Admin token missing or wrong.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    AdminDisabled:
+      description: Admin API not enabled (no `admin.token` configured).
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    Tier:
+      type: string
+      enum: [free, pro, enterprise]
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    UsageEvent:
+      type: object
+      required: [provider]
+      properties:
+        provider: { type: string, example: anthropic }
+        model: { type: string, nullable: true, example: claude-opus-4-8 }
+        task_type: { type: string, default: general }
+        workspace: { type: string, nullable: true, description: "id, slug, or name; auto-created within the tier's workspace cap." }
+        input_tokens: { type: integer, default: 0 }
+        output_tokens: { type: integer, default: 0 }
+        cache_read_tokens: { type: integer, default: 0 }
+        reasoning_tokens: { type: integer, default: 0 }
+        cost_usd: { type: number, nullable: true, description: "Exact cost; omit to estimate from tokens. Must be >= 0." }
+        source: { type: string, default: api }
+    EventResult:
+      type: object
+      properties:
+        recorded: { type: boolean }
+        event_id: { type: string, nullable: true }
+        cost_usd: { type: number }
+        estimated: { type: boolean }
+        balance_after: { type: number }
+        over_free_limit: { type: boolean }
+        over_balance: { type: boolean }
+        unpriced: { type: boolean, description: "True when the cost is an estimate with no exact model price." }
+    UsageResponse:
+      type: object
+      description: |
+        Always carries the org summary fields. A single-event request also
+        inlines the `EventResult` fields; a batch instead carries `results[]`
+        plus the block counts.
+      properties:
+        org_id: { type: string }
+        tracked_tokens_mtd: { type: integer }
+        tracked_limit: { type: integer, nullable: true }
+        tier: { type: string }
+        recorded:
+          oneOf: [{ type: boolean }, { type: integer }]
+          description: "Single event: boolean. Batch: count of recorded events."
+        results:
+          type: array
+          description: Present for batches only.
+          items: { $ref: '#/components/schemas/EventResult' }
+        blocked: { type: integer, description: "Batch only — total rejected (free-limit + over-balance)." }
+        free_limit_blocked: { type: integer, description: "Batch only." }
+        over_balance_blocked: { type: integer, description: "Batch only." }
+        idempotent_replay: { type: boolean, description: "Present and true when this is a replayed response for a duplicate Idempotency-Key." }
+    ExportedEvent:
+      type: object
+      properties:
+        id: { type: string }
+        ts: { type: number }
+        provider: { type: string }
+        model: { type: string, nullable: true }
+        task_type: { type: string }
+        workspace: { type: string, nullable: true }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cache_read_tokens: { type: integer }
+        reasoning_tokens: { type: integer }
+        cost_usd: { type: number }
+        estimated: { type: boolean }
+        source: { type: string }
+    Org:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        tier: { type: string }
+        balance: { type: number, description: "Present in admin list responses." }
+    ApiKeyInfo:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string, nullable: true }
+        prefix: { type: string }
+        created_at: { type: number }
+        last_used_at: { type: number, nullable: true }
+        revoked_at: { type: number, nullable: true }
