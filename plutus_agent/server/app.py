@@ -477,6 +477,7 @@ class Handler(BaseHTTPRequestHandler):
                         "balance_after": res.balance_after,
                         "over_free_limit": res.over_free_limit,
                         "over_balance": res.over_balance,
+                        "unpriced": res.unpriced,
                     })
         except Exception:
             return self._json(400, {"error": "batch recording failed"})

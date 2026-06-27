@@ -42,6 +42,7 @@ class MeterResult:
     recorded: bool = True        # False when a hard free-tier cap dropped the event
     over_free_limit: bool = False  # org is on a limited tier and past its monthly quota
     over_balance: bool = False  # Fix #28: org hit prepaid credit hard-stop
+    unpriced: bool = False  # Fix #64: cost is an estimate with no exact model price
 
 
 def _resolve_workspace(conn, org_id: str, workspace: Optional[str],
@@ -119,11 +120,15 @@ def record_usage(conn, org_id: str, provider: str,
     workspace_id = _resolve_workspace(conn, org_id, workspace, commit=commit)
 
     estimated = cost_usd is None
+    unpriced = False
     if estimated:
-        cost_usd = pricing.estimate_cost(
-            provider, model, input_tokens, output_tokens,
-            cache_read_tokens, reasoning_tokens, pricing_overrides,
-        )
+        # Fix #64: flag estimates that fell back to a provider/global default
+        # (no exact model price) so a coarse estimate is never mistaken for an
+        # authoritative cost. The caller should pass exact cost_usd or calibrate.
+        price, exact = pricing.resolve_price(provider, model, pricing_overrides)
+        cost_usd = price.cost(input_tokens, output_tokens,
+                              cache_read_tokens, reasoning_tokens)
+        unpriced = not exact
     cost_usd = round(float(cost_usd), 6)
 
     # Fix #61: never let a negative cost through the debit hot path. A negative
@@ -158,6 +163,7 @@ def record_usage(conn, org_id: str, provider: str,
                 cost_usd=cost_usd, estimated=estimated,
                 balance_after=balance, alerts=[],
                 recorded=False, over_free_limit=False, over_balance=True,
+                unpriced=unpriced,
             )
 
     eid = db.new_id("evt")
@@ -191,7 +197,7 @@ def record_usage(conn, org_id: str, provider: str,
         provider=provider, model=model, task_type=task_type,
         cost_usd=cost_usd, estimated=estimated,
         balance_after=balance_after, alerts=alerts,
-        recorded=True, over_free_limit=over,
+        recorded=True, over_free_limit=over, unpriced=unpriced,
     )
 
 

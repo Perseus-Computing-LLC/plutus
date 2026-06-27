@@ -4,6 +4,21 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Estimated costs are flagged `unpriced` when no exact model price exists
+  (#64).** Whenever a usage event is metered without an exact `cost_usd` and the
+  (provider, model) isn't in the price table, the cost falls back to a
+  provider/global default — previously with no signal, so a coarse estimate
+  looked authoritative. `MeterResult.unpriced` now carries that signal and it is
+  surfaced per-event in the `/v1/usage` response. The price table is expanded to
+  current 2026 models (adds `claude-fable-5`, the GPT-5 family, more Gemini, and
+  xAI / Mistral / Cohere / Meta providers), carries a dated `PRICE_TABLE_AS_OF`
+  stamp shown on the pricing page, and `ModelPrice` can now price reasoning
+  tokens separately (defaults to the output rate, so existing estimates are
+  unchanged). *Deferred:* persisting `unpriced` onto historical dashboard rows
+  (needs a `usage_events` column) and cache-*write* token pricing (needs a new
+  event token field) — both noted for a follow-up.
+
 ### Fixed
 - **Money-correctness cluster (#63) — four independent fixes:**
   - **USD-only is enforced.** The credit ledger stores plain USD micro-dollars
