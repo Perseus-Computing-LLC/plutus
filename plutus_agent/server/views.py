@@ -146,7 +146,10 @@ def _e(s):
 def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
                      stripe_status: dict, demo: bool = False,
                      runway: dict | None = None, user=None,
-                     api_keys: list | None = None) -> str:
+                     api_keys: list | None = None, csrf: str = "") -> str:
+    # Fix #58: hidden CSRF field embedded in every state-changing form.
+    csrf_field = (f"<input type='hidden' name='_csrf' value='{_e(csrf)}'>"
+                  if csrf else "")
     org = summary["org"]
     tier = summary["tier"]
     w = summary["windows"]
@@ -181,7 +184,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
                    "Pro includes up to 10 workspaces — $20/mo.")
         if can_pro:
             cta = (f"<form method='post' action='/billing/checkout/pro'>"
-                   f"<input type='hidden' name='org' value='{_e(org['id'])}'>"
+                   f"<input type='hidden' name='org' value='{_e(org['id'])}'>{csrf_field}"
                    f"<button class='btn' type='submit'>Upgrade to Pro →</button></form>"
                    f"<a class='btn ghost' href='/pricing'>Compare plans</a>")
         else:
@@ -206,6 +209,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
             "<span style='font-size:12px;color:var(--dim);display:flex;gap:6px;align-items:center'>"
             f"{_e(ident)} · "
             "<form method='post' action='/auth/logout' style='display:inline;margin:0'>"
+            f"{csrf_field}"
             "<button type='submit' style='background:none;border:none;color:var(--dim);cursor:pointer;padding:0;font:inherit'>Sign out</button>"
             "</form></span>")
 
@@ -301,7 +305,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
     if can_checkout:
         billing = f"""
         <form class="billing" method="post" action="/billing/checkout/credit">
-          <input type="hidden" name="org" value="{_e(org['id'])}">
+          <input type="hidden" name="org" value="{_e(org['id'])}">{csrf_field}
           <span class="muted">Buy prepaid credit:</span>
           <input class="amt" type="number" name="amount" value="50" min="5" step="5">
           <button class="btn" type="submit">Top up →</button>
@@ -347,7 +351,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
             f"<td class='num muted'>{_e(used)}</td>"
             f"<td style='text-align:right'><form method='post' action='/keys/revoke' style='margin:0'>"
             f"<input type='hidden' name='org' value='{_e(org['id'])}'>"
-            f"<input type='hidden' name='key_id' value='{_e(k['id'])}'>"
+            f"<input type='hidden' name='key_id' value='{_e(k['id'])}'>{csrf_field}"
             f"<button class='btn ghost' type='submit'>Revoke</button></form></td></tr>")
     keys_table = ("".join(key_rows)
                   or "<tr><td colspan=3 class='empty'>No API keys yet — create one to start sending usage.</td></tr>")
@@ -361,7 +365,7 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
       <table><thead><tr><th>Name</th><th>Last used</th><th></th></tr></thead>
       <tbody>{keys_table}</tbody></table>
       <form class="billing" method="post" action="/keys/create">
-        <input type="hidden" name="org" value="{_e(org['id'])}">
+        <input type="hidden" name="org" value="{_e(org['id'])}">{csrf_field}
         <span class="muted">New key:</span>
         <input class="amt" style="width:160px" type="text" name="name" placeholder="e.g. prod agent">
         <button class="btn" type="submit">Create key →</button>
@@ -415,10 +419,12 @@ def render_dashboard(summary: dict, *, orgs: list, cfg: dict,
 
 
 def pricing_page(*, stripe_status: dict, org_id: str | None = None,
-                 user=None, signed_in: bool = False) -> str:
+                 user=None, signed_in: bool = False, csrf: str = "") -> str:
     """Public plans page — the comparison surface the upgrade nudges point to."""
     from .. import pricing
     can_pro = stripe_status.get("available") and stripe_status.get("has_pro_price")
+    csrf_field = (f"<input type='hidden' name='_csrf' value='{_e(csrf)}'>"
+                  if csrf else "")
 
     cards = []
     for key in ("free", "pro", "enterprise"):
@@ -432,7 +438,7 @@ def pricing_page(*, stripe_status: dict, org_id: str | None = None,
                 cta = "<a class='btn' href='/auth/login'>Sign in to upgrade →</a>"
             elif can_pro and org_id:
                 cta = (f"<form method='post' action='/billing/checkout/pro' style='margin:0'>"
-                       f"<input type='hidden' name='org' value='{_e(org_id)}'>"
+                       f"<input type='hidden' name='org' value='{_e(org_id)}'>{csrf_field}"
                        f"<button class='btn' type='submit'>Upgrade to Pro →</button></form>")
             else:
                 cta = "<a class='btn ghost' href='/'>Open dashboard</a>"
