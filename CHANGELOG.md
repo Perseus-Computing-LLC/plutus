@@ -4,6 +4,14 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Orphaned in-flight Idempotency-Key no longer 409s forever (review F3, #80).**
+  If a request crashed between claiming an `Idempotency-Key` and storing its
+  response, the row stayed `status=NULL` and every retry got `409` permanently.
+  A claimed-but-unanswered row older than a 2-minute grace window is now
+  reclaimable (re-processed), while a *completed* claim is never reclaimed
+  (replay preserved). Added `db.purge_idempotency()` to bound the table.
+
 ### Added
 - **OpenAPI 3.1 spec for `/v1/*` + the forward-compatibility contract (#67).**
   [`openapi.yaml`](openapi.yaml) documents the frozen `/v1` surface (usage ingest,

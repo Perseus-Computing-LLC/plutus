@@ -791,6 +791,13 @@ def unmark_stripe_event(conn, event_id: str) -> None:
 
 
 # ------------------------------------------------------- ingest idempotency ---
+# Fix #80 (review F3): how long a claimed-but-unanswered Idempotency-Key row may
+# sit before it's treated as orphaned (the original request crashed between the
+# claim commit and storing its response) and the key is allowed to be re-claimed,
+# instead of 409-ing that key forever. Comfortably longer than any real request.
+IDEMPOTENCY_INFLIGHT_GRACE = 120.0
+
+
 def claim_idempotency_key(conn, org_id: str, idem_key: str,
                           ts: Optional[float] = None, commit: bool = True) -> bool:
     """Atomically claim an ingest Idempotency-Key for an org (fix #65).
@@ -799,11 +806,22 @@ def claim_idempotency_key(conn, org_id: str, idem_key: str,
     response), False when the key was already seen (caller should replay the
     stored response instead of re-recording). Call with ``commit=False`` inside a
     ``db.immediate`` block so the claim is atomic with the recording it guards.
+
+    Fix #80 (F3): an orphaned in-flight claim (``status`` still NULL, older than
+    ``IDEMPOTENCY_INFLIGHT_GRACE`` — the original request died before storing its
+    response) is reclaimable, so a crash can't 409 that key forever. A *completed*
+    claim (``status`` set) is never reclaimed, preserving replay.
     """
+    now = ts if ts is not None else time.time()
+    conn.execute(
+        "DELETE FROM ingest_idempotency WHERE org_id=? AND idem_key=? "
+        "AND status IS NULL AND ts < ?",
+        (org_id, idem_key, now - IDEMPOTENCY_INFLIGHT_GRACE),
+    )
     cur = conn.execute(
         "INSERT OR IGNORE INTO ingest_idempotency(org_id,idem_key,status,response,ts)"
         " VALUES(?,?,NULL,NULL,?)",
-        (org_id, idem_key, ts if ts is not None else time.time()),
+        (org_id, idem_key, now),
     )
     if commit:
         conn.commit()
@@ -832,6 +850,18 @@ def idempotency_response(conn, org_id: str, idem_key: str):
     if row is None:
         return None
     return row["status"], row["response"]
+
+
+def purge_idempotency(conn, older_than_seconds: float = 86400) -> int:
+    """Housekeeping sweep: drop ingest idempotency rows older than the cutoff
+    (default 24h) so the table can't grow without bound. Replay protection only
+    needs to cover a client's realistic retry window. Returns rows removed."""
+    cur = conn.execute(
+        "DELETE FROM ingest_idempotency WHERE ts < ?",
+        (time.time() - older_than_seconds,),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 # -------------------------------------------------------------- alerts log ---
