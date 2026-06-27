@@ -437,6 +437,22 @@ def handle_callback(conn, cfg, q: dict, client_ip: Optional[str] = None) -> str:
     return db.create_session(conn, user_id, ttl)
 
 
+# ------------------------------------------------------------- csrf helpers ---
+def csrf_token(session_token: str) -> str:
+    """Per-session CSRF synchronizer token (fix #58).
+
+    HMAC-SHA256 keyed by the (secret, high-entropy) session token itself, so it
+    is derivable only by the holder of the session cookie and never leaks the
+    cookie value when embedded in HTML. Returns "" for an empty session.
+    """
+    if not session_token:
+        return ""
+    import hashlib
+    import hmac
+    return hmac.new(session_token.encode("utf-8"), b"plutus-csrf-v1",
+                    hashlib.sha256).hexdigest()
+
+
 # ----------------------------------------------------------- cookie helpers ---
 def read_cookie(handler) -> str:
     raw = handler.headers.get("Cookie", "")

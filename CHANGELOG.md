@@ -5,6 +5,15 @@ All notable changes to Plutus are documented here.
 ## [Unreleased]
 
 ### Security
+- **CSRF synchronizer token as defense-in-depth (#58).** State-changing
+  dashboard POSTs now accept a per-session CSRF token in addition to the existing
+  fail-closed Origin/Referer check: a request passes if it is same-origin **or**
+  carries a valid token. This lets through legitimate requests whose
+  Origin/Referer a privacy proxy stripped (which the origin check rejects), while
+  a forgery — which can't know the token — is still blocked. The token is
+  `HMAC-SHA256(session_token, "plutus-csrf-v1")`, derivable only by the cookie
+  holder and never leaking the cookie; it's embedded as a hidden `_csrf` field in
+  every dashboard/pricing form. The origin check remains the first gate.
 - **Per-IP self-serve signup throttle (#59).** The existing global hourly limiter
   and DB-backed daily org cap (#33) are both global, so one abuser could drain
   the whole daily budget and lock out legitimate signups. A new per-IP cap

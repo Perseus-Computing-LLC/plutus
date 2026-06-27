@@ -175,10 +175,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _body(self, max_bytes=MAX_BODY_BYTES) -> bytes:
+        # Cache per request so the body can be read more than once (the CSRF gate
+        # reads it to check the token, then the handler parses it). Reset in
+        # do_POST so a keep-alive connection's next request starts fresh.
+        if getattr(self, "_cached_body", None) is not None:
+            return self._cached_body
         n = int(self.headers.get("Content-Length", 0) or 0)
         if n > max_bytes:
             raise _BodyTooLarge(f"request body {n} bytes exceeds limit {max_bytes}")
-        return self.rfile.read(n) if n else b""
+        self._cached_body = self.rfile.read(n) if n else b""
+        return self._cached_body
 
     def _form(self) -> dict:
         raw = self._body().decode("utf-8", "replace")
@@ -310,6 +316,18 @@ class Handler(BaseHTTPRequestHandler):
                 return urlparse(val).netloc.lower() == expected
         return False
 
+    def _csrf_token_ok(self) -> bool:
+        """Fix #58: validate the per-session CSRF synchronizer token from the
+        ``_csrf`` form field against the value derived from the session cookie.
+        Defense-in-depth that lets through legit requests whose Origin/Referer was
+        stripped, while a forgery (which can't know the session token) still fails."""
+        sess = authmod.read_cookie(self)
+        if not sess:
+            return False
+        expected = authmod.csrf_token(sess)
+        submitted = self._form().get("_csrf", "")
+        return bool(submitted) and secrets.compare_digest(submitted, expected)
+
     # ---- routing -----------------------------------------------------------
     def do_HEAD(self):
         self.do_GET()
@@ -389,19 +407,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         path = u.path
+        self._cached_body = None  # fresh per request (keep-alive safe)
         conn = self._conn()
         try:
             if not self._gate(conn, path):
                 return
-            
-            # CSRF protection: cookie-authenticated state-changing POSTs must be same-origin
-            # Exempt: /v1/usage (Bearer auth), /webhook/stripe (signature-verified)
+
+            # CSRF protection: cookie-authenticated state-changing POSTs must pass
+            # a same-origin check OR carry a valid per-session synchronizer token
+            # (#58 — the token lets through legit requests whose Origin/Referer a
+            # privacy proxy stripped, while still blocking forgeries that have
+            # neither). Exempt: /v1/usage (Bearer auth), /webhook/stripe (signed).
             needs_csrf_check = (
-                self.ctx.auth_on and 
+                self.ctx.auth_on and
                 path not in {"/v1/usage", "/webhook/stripe"} and
                 self._user is not None  # Cookie-authenticated
             )
-            if needs_csrf_check and not self._same_origin():
+            if needs_csrf_check and not (self._same_origin() or self._csrf_token_ok()):
                 return self._json(403, {"error": "cross-origin request blocked"})
             
             if path == "/auth/logout":
@@ -458,6 +480,7 @@ class Handler(BaseHTTPRequestHandler):
             stripe_status=self.ctx.stripe.status(), demo=self.ctx.demo,
             runway=self.ctx.runway(authed=self._user is not None), user=self._user,
             api_keys=[dict(k) for k in db.list_api_keys(conn, org_id)],
+            csrf=authmod.csrf_token(authmod.read_cookie(self)),
         )
         return self._send(200, page)
 
@@ -471,7 +494,8 @@ class Handler(BaseHTTPRequestHandler):
                 org_id = None
         return self._send(200, views.pricing_page(
             stripe_status=self.ctx.stripe.status(),
-            org_id=org_id, user=self._user, signed_in=signed_in))
+            org_id=org_id, user=self._user, signed_in=signed_in,
+            csrf=authmod.csrf_token(authmod.read_cookie(self))))
 
     # ---- ingest API --------------------------------------------------------
     def _bearer_org(self, conn):
