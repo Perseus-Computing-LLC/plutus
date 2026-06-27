@@ -358,6 +358,72 @@ class TestPrepaidHardStop(unittest.TestCase):
             self.assertIn("credit exhausted", body["error"])
 
 
+class TestBatchPartialBlock(unittest.TestCase):
+    """#62: a batch with some over-balance rejections must surface them — a 200
+    is not "all recorded", and the prepaid hard-stop count was missing entirely."""
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = db.connect(cls.dbpath)
+        db.init_schema(conn)
+        cls.org_id = db.create_org(conn, "Prepaid Co", tier="pro")["id"]
+        _, cls.key = db.create_api_key(conn, cls.org_id)
+        db.add_ledger(conn, cls.org_id, 1.0, "topup")  # $1 credit
+        conn.close()
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["pricing"] = dict(cfg["pricing"], block_over_balance=True)
+        ctx = app._Ctx(cfg, cls.dbpath, demo=False)
+        cls.httpd = app._Server(("127.0.0.1", 0), app.Handler, ctx)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(cls.dbpath + ext)
+            except OSError:
+                pass
+
+    def _post(self, payload):
+        url = f"http://127.0.0.1:{self.port}/v1/usage"
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.key}"}, method="POST")
+        try:
+            resp = urllib.request.urlopen(req, timeout=5)
+            return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+
+    def test_partial_block_is_200_but_surfaces_over_balance(self):
+        # First event lands ($0.50 of $1), second exceeds remaining credit.
+        status, body = self._post([
+            {"provider": "anthropic", "cost_usd": 0.50},
+            {"provider": "anthropic", "cost_usd": 10.0},
+        ])
+        self.assertEqual(status, 200)
+        self.assertEqual(body["recorded"], 1)
+        self.assertEqual(body["over_balance_blocked"], 1)
+        self.assertEqual(body["free_limit_blocked"], 0)
+        self.assertEqual(body["blocked"], 1)  # total includes the hard-stop
+
+    def test_whole_batch_over_balance_returns_402(self):
+        status, body = self._post([
+            {"provider": "anthropic", "cost_usd": 10.0},
+            {"provider": "anthropic", "cost_usd": 10.0},
+        ])
+        self.assertEqual(status, 402)
+        self.assertEqual(body["recorded"], 0)
+        self.assertEqual(body["over_balance_blocked"], 2)
+        self.assertIn("credit exhausted", body["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
