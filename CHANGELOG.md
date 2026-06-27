@@ -4,6 +4,16 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Dashboard "Sign out" chip used an undefined `--muted` CSS var (#56).** The
+  signed-in user chip and its Sign-out button now use `var(--dim)`, so the text
+  renders in the intended dim gray instead of falling back to the inherited color.
+
+### Changed
+- **Package version is single-sourced (#57).** `pyproject.toml` now declares
+  `dynamic = ["version"]` reading from `plutus_agent.__version__`, so the wheel
+  metadata and `plutus version` can no longer drift apart.
+
 ### Tests
 - **High-risk auth/tenant coverage (#66, part 3 — closes #66).** Added tests for
   the previously-untested money/auth paths: the hand-rolled OIDC **RS256 verifier**
