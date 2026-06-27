@@ -255,10 +255,24 @@ class Handler(BaseHTTPRequestHandler):
                 "Sign in", "Sign-in is misconfigured", html.escape(str(e)), ok=False))
         return self._send(200, views.login_page(url))
 
+    def _client_ip(self) -> str:
+        """Best-effort client IP for rate limiting (fix #59). Honors the first
+        X-Forwarded-For hop only when auth.trust_forwarded_for is set (i.e. the
+        server runs behind a trusted reverse proxy); otherwise the socket peer."""
+        if self.ctx.cfg.get("auth", {}).get("trust_forwarded_for"):
+            xff = self.headers.get("X-Forwarded-For", "")
+            if xff:
+                return xff.split(",")[0].strip()
+        try:
+            return self.client_address[0]
+        except Exception:
+            return ""
+
     def _auth_callback(self, conn, q):
         flat = {k: (v[0] if isinstance(v, list) else v) for k, v in q.items()}
         try:
-            token = authmod.handle_callback(conn, self.ctx.cfg, flat)
+            token = authmod.handle_callback(conn, self.ctx.cfg, flat,
+                                            client_ip=self._client_ip())
         except authmod.AuthError as e:
             return self._send(403, views.simple_page(
                 "Sign in", "Could not sign you in", html.escape(str(e)), ok=False))
