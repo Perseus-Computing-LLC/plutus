@@ -50,9 +50,17 @@ _SIGNUP_WINDOW = 3600  # 1 hour in seconds
 _pending: dict[str, tuple[str, float]] = {}
 _pending_lock = threading.Lock()
 
-# Signup rate limiter: list of signup timestamps
+# Signup rate limiter: list of signup timestamps (global hourly ceiling)
 _signup_times: list[float] = []
 _signup_lock = threading.Lock()
+
+# Fix #59: per-IP signup timestamps {ip: [ts, ...]} so one source can't exhaust
+# the global daily budget (a self-DoS of the funnel). In-memory ring, pruned on
+# access — resets on restart, which is fine as a first cut behind the DB-backed
+# daily cap (#33) and the global hourly limiter.
+_signup_times_by_ip: dict[str, list] = {}
+_signup_ip_lock = threading.Lock()
+_SIGNUP_IP_WINDOW = 86400  # 24h
 
 # JWKS cache: {kid: (n, e, expires_at)}
 _jwks_cache: dict[str, tuple[int, int, float]] = {}
@@ -327,7 +335,29 @@ def _allow_signup_now() -> bool:
         return True
 
 
-def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optional[str]:
+def _allow_signup_ip(ip: str, per_day: int) -> bool:
+    """Per-IP signup throttle (fix #59). ``per_day`` <= 0 disables it. Returns
+    True (and records the attempt) if this IP is under its 24h budget."""
+    if per_day <= 0 or not ip:
+        return True
+    now = time.time()
+    cutoff = now - _SIGNUP_IP_WINDOW
+    with _signup_ip_lock:
+        times = [t for t in _signup_times_by_ip.get(ip, []) if t >= cutoff]
+        if len(times) >= per_day:
+            _signup_times_by_ip[ip] = times
+            return False
+        times.append(now)
+        _signup_times_by_ip[ip] = times
+        # opportunistic prune of fully-expired IP buckets
+        for k in [k for k, v in _signup_times_by_ip.items()
+                  if not any(t >= cutoff for t in v)]:
+            _signup_times_by_ip.pop(k, None)
+        return True
+
+
+def _authorize_email(conn, cfg, email: str, name: Optional[str] = None,
+                     client_ip: Optional[str] = None) -> Optional[str]:
     """Return the user_id to bind a session to, or None if not allowed.
 
     Existing members sign in as themselves. A newly-allowed email (via
@@ -358,6 +388,12 @@ def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optio
         day_cap = int(auth.get("max_new_orgs_per_day", 0) or 0)
         if day_cap > 0 and db.count_orgs_created_since(conn, time.time() - 86400) >= day_cap:
             raise AuthError("daily signup limit reached — try again tomorrow")
+        # Fix #59: per-IP throttle so a single source can't drain the global
+        # budget and lock out legitimate signups. Checked before the global
+        # hourly limiter so an abuser is rejected without consuming that quota.
+        per_ip = int(auth.get("max_signups_per_ip_per_day", 0) or 0)
+        if not _allow_signup_ip(client_ip or "", per_ip):
+            raise AuthError("too many signups from your network — try again later")
         # In-memory hourly limiter (first layer; resets on restart).
         if not _allow_signup_now():
             raise AuthError("signup temporarily rate-limited, try again later")
@@ -369,10 +405,11 @@ def _authorize_email(conn, cfg, email: str, name: Optional[str] = None) -> Optio
     return None
 
 
-def handle_callback(conn, cfg, q: dict) -> str:
+def handle_callback(conn, cfg, q: dict, client_ip: Optional[str] = None) -> str:
     """Process /auth/callback query params; return a fresh session token.
 
-    Raises :class:`AuthError` on any problem.
+    ``client_ip`` (fix #59) feeds the per-IP signup throttle. Raises
+    :class:`AuthError` on any problem.
     """
     if q.get("error"):
         raise AuthError(f"Google returned an error: {q['error']}")
@@ -391,7 +428,8 @@ def handle_callback(conn, cfg, q: dict) -> str:
     claims = _claims_from_id_token(id_token, cfg, nonce)
 
     email = claims["email"]
-    user_id = _authorize_email(conn, cfg, email, name=claims.get("name"))
+    user_id = _authorize_email(conn, cfg, email, name=claims.get("name"),
+                               client_ip=client_ip)
     if not user_id:
         raise AuthError(f"{email} is not authorized to use this Plutus instance")
 

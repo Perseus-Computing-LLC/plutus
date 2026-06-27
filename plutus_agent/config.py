@@ -51,6 +51,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_new_orgs_per_day": 50,   # #33: DB-backed hard ceiling on self-serve org
                                       # creation per rolling 24h (survives restarts);
                                       # complements the in-memory hourly limiter. 0 = no cap.
+        "max_signups_per_ip_per_day": 3,  # #59: per-IP signup throttle so one source
+                                      # can't drain the global daily budget. In-memory
+                                      # (resets on restart). 0 = no per-IP cap.
+        "trust_forwarded_for": False,  # #59: when behind a trusted reverse proxy
+                                      # (Cloudflare/Caddy), use the first
+                                      # X-Forwarded-For hop as the client IP. Leave
+                                      # OFF when directly exposed (XFF is spoofable).
         "session_ttl_hours": 168,     # session lifetime (7 days)
         "allow_unsigned_tokens": False,  # TEST ONLY: skip OIDC RS256 signature
                                       # verification. Never enable in production —

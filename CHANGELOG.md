@@ -4,6 +4,16 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Security
+- **Per-IP self-serve signup throttle (#59).** The existing global hourly limiter
+  and DB-backed daily org cap (#33) are both global, so one abuser could drain
+  the whole daily budget and lock out legitimate signups. A new per-IP cap
+  (`auth.max_signups_per_ip_per_day`, default 3; in-memory 24h ring) is checked
+  before the global limiter. The client IP is the socket peer by default, or the
+  first `X-Forwarded-For` hop when `auth.trust_forwarded_for` is set (for running
+  behind a trusted reverse proxy). Existing members signing in are never
+  throttled — only new-org self-serve signups.
+
 ### Fixed
 - **Dashboard "Sign out" chip used an undefined `--muted` CSS var (#56).** The
   signed-in user chip and its Sign-out button now use `var(--dim)`, so the text
