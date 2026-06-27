@@ -4,6 +4,22 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Security
+- **`/v1/usage` ingest hardening (#65).**
+  - **Idempotency-Key.** A retried or duplicated POST used to double-count usage
+    and double-debit credit (the inverse of the webhook idempotency from #26).
+    The endpoint now accepts an `Idempotency-Key` header, claims it atomically
+    with the recording (per-org `ingest_idempotency` table), and replays the
+    stored response on a duplicate instead of re-recording.
+  - **Per-key rate limit.** A leaked/abusive key could fire unbounded batches; a
+    per-key token-bucket limiter (config `ingest.rate_per_min` / `burst`) now
+    returns `429` when exceeded.
+  - **Monitor-bridge lock-down.** The bridge subprocess now requires the command
+    to be an absolute path present in `monitor.allowed_binaries` (fail-closed,
+    structured argv, `shell=False`), and when auth is on it only shells out for
+    an authenticated request — an unauthenticated dashboard hit no longer
+    triggers it.
+
 ### Added
 - **Estimated costs are flagged `unpriced` when no exact model price exists
   (#64).** Whenever a usage event is metered without an exact `cost_usd` and the

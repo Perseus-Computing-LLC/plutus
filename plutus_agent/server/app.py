@@ -6,11 +6,13 @@ connection per request (SQLite connections aren't thread-safe to share).
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
 import secrets
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -69,17 +71,45 @@ class _Ctx:
         self.auth_on = cfgmod.auth_enabled(cfg)
         self._runway = None
         self._runway_ts = 0
+        # Fix #65: per-key ingest token buckets {key_hash: [tokens, last_ts]}.
+        self._buckets: dict[str, list] = {}
+        self._bucket_lock = threading.Lock()
 
-    def runway(self):
-        """Cached monitor bridge (refresh at most every 60s)."""
+    def runway(self, authed: bool = False):
+        """Cached monitor bridge (refresh at most every 60s).
+
+        Fix #65: when auth is enabled, the bridge subprocess only runs for an
+        authenticated request — an unauthenticated dashboard hit never triggers
+        the shell-out. (With auth off the server is in local trusted mode.)
+        """
         mon = self.cfg.get("monitor", {})
         if not mon.get("enabled"):
             return None
+        if self.auth_on and not authed:
+            return self._runway  # serve the last cached value, don't shell out
         now = time.time()
         if now - self._runway_ts > 60:
             self._runway = bridge.runway(mon)
             self._runway_ts = now
         return self._runway
+
+    def allow_ingest(self, key_hash: str, now: float) -> bool:
+        """Per-key token-bucket rate limit for /v1/usage (fix #65). Returns True
+        if a request is permitted and consumes a token."""
+        ing = self.cfg.get("ingest", {})
+        rate = float(ing.get("rate_per_min", 600) or 0)
+        if rate <= 0:
+            return True  # limiting disabled
+        burst = float(ing.get("burst", rate) or rate)
+        refill_per_sec = rate / 60.0
+        with self._bucket_lock:
+            tokens, last = self._buckets.get(key_hash, [burst, now])
+            tokens = min(burst, tokens + (now - last) * refill_per_sec)
+            if tokens < 1.0:
+                self._buckets[key_hash] = [tokens, now]
+                return False
+            self._buckets[key_hash] = [tokens - 1.0, now]
+            return True
 
 
 class _Server(ThreadingHTTPServer):
@@ -365,7 +395,7 @@ class Handler(BaseHTTPRequestHandler):
         page = views.render_dashboard(
             summary, orgs=self._scoped_orgs(conn), cfg=self.ctx.cfg,
             stripe_status=self.ctx.stripe.status(), demo=self.ctx.demo,
-            runway=self.ctx.runway(), user=self._user,
+            runway=self.ctx.runway(authed=self._user is not None), user=self._user,
             api_keys=[dict(k) for k in db.list_api_keys(conn, org_id)],
         )
         return self._send(200, page)
@@ -399,6 +429,13 @@ class Handler(BaseHTTPRequestHandler):
         org_id = self._bearer_org(conn)
         if not org_id:
             return self._json(401, {"error": "invalid or missing API key"})
+        # Fix #65: per-key token-bucket rate limit. The bucket key is a hash of
+        # the bearer token (the raw secret is never stored or logged).
+        token = self.headers.get("Authorization", "")[7:].strip()
+        key_hash = hashlib.sha256(token.encode()).hexdigest()
+        if not self.ctx.allow_ingest(key_hash, time.time()):
+            return self._json(429, {"error": "rate limit exceeded — slow down"})
+        idem_key = (self.headers.get("Idempotency-Key") or "").strip() or None
         try:
             body = self._body()
         except _BodyTooLarge:
@@ -445,42 +482,62 @@ class Handler(BaseHTTPRequestHandler):
         # a concurrent writer between the read and the insert, and commits once
         # (no partial batch). record_usage(commit=False) defers to that commit.
         out, n_blocked, n_over_balance = [], 0, 0
+        replay = False
         try:
             with db.immediate(conn):
-                for ev in events:
-                    res = metering.record_usage(
-                        conn, org_id, provider=str(ev["provider"]),
-                        model=ev.get("model"), task_type=ev.get("task_type", "general"),
-                        workspace=ev.get("workspace"),
-                        input_tokens=strict_int(ev.get("input_tokens", 0) or 0),
-                        output_tokens=strict_int(ev.get("output_tokens", 0) or 0),
-                        cache_read_tokens=strict_int(ev.get("cache_read_tokens", 0) or 0),
-                        reasoning_tokens=strict_int(ev.get("reasoning_tokens", 0) or 0),
-                        cost_usd=ev.get("cost_usd"),
-                        source=ev.get("source", "api"),
-                        pricing_overrides=cfg.get("pricing", {}).get("overrides"),
-                        alert_cfg=cfg.get("alerts", {}),
-                        block_over_limit=block_free,
-                        block_over_balance=block_balance,
-                        commit=False,  # defer commit to db.immediate()
-                    )
-                    if not res.recorded:
-                        if res.over_balance:
-                            n_over_balance += 1
-                        else:
-                            n_blocked += 1
-                    out.append({
-                        "recorded": res.recorded,
-                        "event_id": res.event_id or None,
-                        "cost_usd": res.cost_usd,
-                        "estimated": res.estimated,
-                        "balance_after": res.balance_after,
-                        "over_free_limit": res.over_free_limit,
-                        "over_balance": res.over_balance,
-                        "unpriced": res.unpriced,
-                    })
+                # Fix #65: claim the Idempotency-Key atomically with the recording
+                # so a retried/duplicated POST can't double-count or double-debit.
+                if idem_key and not db.claim_idempotency_key(
+                        conn, org_id, idem_key, commit=False):
+                    replay = True
+                else:
+                    for ev in events:
+                        res = metering.record_usage(
+                            conn, org_id, provider=str(ev["provider"]),
+                            model=ev.get("model"), task_type=ev.get("task_type", "general"),
+                            workspace=ev.get("workspace"),
+                            input_tokens=strict_int(ev.get("input_tokens", 0) or 0),
+                            output_tokens=strict_int(ev.get("output_tokens", 0) or 0),
+                            cache_read_tokens=strict_int(ev.get("cache_read_tokens", 0) or 0),
+                            reasoning_tokens=strict_int(ev.get("reasoning_tokens", 0) or 0),
+                            cost_usd=ev.get("cost_usd"),
+                            source=ev.get("source", "api"),
+                            pricing_overrides=cfg.get("pricing", {}).get("overrides"),
+                            alert_cfg=cfg.get("alerts", {}),
+                            block_over_limit=block_free,
+                            block_over_balance=block_balance,
+                            commit=False,  # defer commit to db.immediate()
+                        )
+                        if not res.recorded:
+                            if res.over_balance:
+                                n_over_balance += 1
+                            else:
+                                n_blocked += 1
+                        out.append({
+                            "recorded": res.recorded,
+                            "event_id": res.event_id or None,
+                            "cost_usd": res.cost_usd,
+                            "estimated": res.estimated,
+                            "balance_after": res.balance_after,
+                            "over_free_limit": res.over_free_limit,
+                            "over_balance": res.over_balance,
+                            "unpriced": res.unpriced,
+                        })
         except Exception:
             return self._json(400, {"error": "batch recording failed"})
+
+        # Fix #65: a duplicate Idempotency-Key replays the stored response rather
+        # than re-recording, so a client retry never double-charges.
+        if replay:
+            prev = db.idempotency_response(conn, org_id, idem_key)
+            if prev and prev[0] is not None:
+                status, resp = prev
+                replayed = json.loads(resp)
+                replayed["idempotent_replay"] = True
+                return self._json(int(status), replayed)
+            # Claimed but the original response isn't stored yet (in flight).
+            return self._json(409, {"error":
+                "a request with this Idempotency-Key is still in progress"})
 
         st = metering.tier_status(conn, org_id)
         body = {
@@ -517,8 +574,13 @@ class Handler(BaseHTTPRequestHandler):
                 body["error"] = ("usage rejected: free-tier quota and prepaid "
                                  "credit both exhausted")
             body["upgrade_url"] = (base + "/pricing") if base else "/pricing"
-            return self._json(402, body)
-        return self._json(200, body)
+            code = 402
+        else:
+            code = 200
+        # Fix #65: persist the response so a duplicate Idempotency-Key replays it.
+        if idem_key:
+            db.store_idempotency_response(conn, org_id, idem_key, code, json.dumps(body))
+        return self._json(code, body)
 
     # ---- API keys (session-gated; created from the dashboard) --------------
     def _keys_create(self, conn):
