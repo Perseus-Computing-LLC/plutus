@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import secrets
 import sys
 import time
@@ -26,6 +27,26 @@ _PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe", "/pricing",
 
 # Max request body size (1 MiB) — protects /v1/usage and /webhook/stripe from DoS
 MAX_BODY_BYTES = 1 * 1024 * 1024
+
+# Fix #63: sane bounds on a prepaid-credit checkout. Stripe itself only rejects
+# amounts <= 0, so inf / nan / a 9-figure typo would otherwise create a checkout.
+CREDIT_MIN_USD = 1.0
+CREDIT_MAX_USD = 10_000.0
+
+
+def _parse_credit_amount(raw) -> float:
+    """Parse + bound a credit top-up amount from form input. Defaults to $50 when
+    blank. Raises :class:`BillingError` (rendered as a 400) on a non-numeric,
+    non-finite, or out-of-range value."""
+    try:
+        amount = float(raw) if raw not in (None, "") else 50.0
+    except (TypeError, ValueError):
+        raise BillingError("amount must be a number")
+    if not math.isfinite(amount) or not (CREDIT_MIN_USD <= amount <= CREDIT_MAX_USD):
+        raise BillingError(
+            f"amount must be between ${CREDIT_MIN_USD:,.0f} and ${CREDIT_MAX_USD:,.0f}"
+        )
+    return amount
 
 
 class _BodyTooLarge(Exception):
@@ -523,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
         org_id = self._authz_org(conn, f.get("org"), strict=True)
         if not org_id:
             raise BillingError("no organization to bill")
-        amount = float(f.get("amount") or 50)
+        amount = _parse_credit_amount(f.get("amount"))
         sess = self.ctx.stripe.credit_checkout(conn, org_id, amount)
         return self._redirect(sess["url"])
 
