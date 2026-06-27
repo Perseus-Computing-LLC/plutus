@@ -84,7 +84,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Optional bridge to the live runway monitor (repo-root plutus.py).
         # When set, the dashboard folds in live provider balances/runway.
         "enabled": False,
-        "command": "",                  # e.g. "python3 /opt/.../plutus.py"
+        "command": "",                  # e.g. "/usr/bin/python3 /opt/.../plutus.py"
+        # Fix #65: the bridge shells out to `command`. To avoid an arbitrary
+        # exec surface, the first token must be an ABSOLUTE path that appears in
+        # this allow-list. Empty list => the bridge refuses to run.
+        "allowed_binaries": [],
+    },
+    "ingest": {
+        # Fix #65: per-API-key token-bucket rate limit on POST /v1/usage. A leaked
+        # or abusive key can otherwise fire unbounded batches. rate_per_min <= 0
+        # disables limiting; burst is the bucket capacity (defaults to rate).
+        "rate_per_min": 600,
+        "burst": 600,
     },
     "pricing": {
         # Override provider price tables here, shaped:

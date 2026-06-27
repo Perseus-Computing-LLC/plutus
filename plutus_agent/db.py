@@ -135,6 +135,16 @@ CREATE TABLE IF NOT EXISTS stripe_events (
     processed_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ingest_idempotency (
+    org_id   TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    idem_key TEXT NOT NULL,                 -- client Idempotency-Key, scoped per org
+    status   INTEGER,                       -- stored response status (NULL = in-flight)
+    response TEXT,                          -- stored response body JSON for replay
+    ts       REAL NOT NULL,
+    PRIMARY KEY (org_id, idem_key)
+);
+CREATE INDEX IF NOT EXISTS ix_idem_ts ON ingest_idempotency(ts);
+
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,        -- opaque random; lives in an HttpOnly cookie
     user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -709,6 +719,50 @@ def unmark_stripe_event(conn, event_id: str) -> None:
     """Remove a Stripe event claim (for rollback on side-effect failure)."""
     conn.execute("DELETE FROM stripe_events WHERE event_id=?", (event_id,))
     conn.commit()
+
+
+# ------------------------------------------------------- ingest idempotency ---
+def claim_idempotency_key(conn, org_id: str, idem_key: str,
+                          ts: Optional[float] = None, commit: bool = True) -> bool:
+    """Atomically claim an ingest Idempotency-Key for an org (fix #65).
+
+    Returns True when newly claimed (caller should process and then store the
+    response), False when the key was already seen (caller should replay the
+    stored response instead of re-recording). Call with ``commit=False`` inside a
+    ``db.immediate`` block so the claim is atomic with the recording it guards.
+    """
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO ingest_idempotency(org_id,idem_key,status,response,ts)"
+        " VALUES(?,?,NULL,NULL,?)",
+        (org_id, idem_key, ts if ts is not None else time.time()),
+    )
+    if commit:
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def store_idempotency_response(conn, org_id: str, idem_key: str, status: int,
+                               response: str, commit: bool = True) -> None:
+    """Persist the response for a claimed Idempotency-Key so a later duplicate
+    replays it verbatim."""
+    conn.execute(
+        "UPDATE ingest_idempotency SET status=?, response=? WHERE org_id=? AND idem_key=?",
+        (int(status), response, org_id, idem_key),
+    )
+    if commit:
+        conn.commit()
+
+
+def idempotency_response(conn, org_id: str, idem_key: str):
+    """Return ``(status, response)`` for a claimed key, or ``None`` if unknown.
+    ``status`` is ``None`` when the original request is still in flight."""
+    row = conn.execute(
+        "SELECT status, response FROM ingest_idempotency WHERE org_id=? AND idem_key=?",
+        (org_id, idem_key),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["status"], row["response"]
 
 
 # -------------------------------------------------------------- alerts log ---
