@@ -407,6 +407,16 @@ class Handler(BaseHTTPRequestHandler):
                 int(ev.get("reasoning_tokens", 0) or 0)
             except (TypeError, ValueError):
                 return self._json(400, {"error": "token fields must be integers"})
+            # Fix #61: reject a negative (or non-numeric) cost_usd before it can
+            # reach the debit hot path, where it would mint credit and bypass the
+            # prepaid hard-stop. None means "estimate from tokens" and is allowed.
+            cost = ev.get("cost_usd")
+            if cost is not None:
+                try:
+                    if float(cost) < 0:
+                        return self._json(400, {"error": "cost_usd must be non-negative"})
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "cost_usd must be a number"})
         
         # All valid — record the whole batch as one serialized transaction.
         # Fix #27/#30: db.immediate() takes the write lock up front (BEGIN

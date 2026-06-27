@@ -125,7 +125,21 @@ def record_usage(conn, org_id: str, provider: str,
             cache_read_tokens, reasoning_tokens, pricing_overrides,
         )
     cost_usd = round(float(cost_usd), 6)
-    
+
+    # Fix #61: never let a negative cost through the debit hot path. A negative
+    # cost_usd would be passed to db.add_ledger(..., -cost_usd, "debit") where
+    # -(-x) becomes a *positive* delta — minting prepaid credit out of thin air —
+    # and would also defeat the hard-stop below (balance - cost_usd can't go
+    # negative when cost_usd < 0). Genuine corrections/credits must go through an
+    # explicit adjust/grant/refund ledger path, never metering. This is the
+    # authoritative guard; the /v1/usage boundary also rejects negatives with a
+    # 400 so HTTP callers get a clean error before ever reaching here.
+    if cost_usd < 0:
+        raise ValueError(
+            f"cost_usd must be non-negative, got {cost_usd}; credits/refunds "
+            "must go through the adjust/grant/refund ledger path, not metering"
+        )
+
     # Fix #28: prepaid credit hard-stop. Skipped for orgs explicitly flagged
     # allow_negative_balance (trusted/internal track-only mode) so they keep
     # full tracking even past zero.

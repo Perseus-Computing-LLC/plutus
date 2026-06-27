@@ -4,6 +4,16 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Security
+- **Negative `cost_usd` can no longer mint prepaid credit or bypass the hard-stop
+  (#61).** A caller-supplied negative `cost_usd` previously flowed to the ledger
+  debit path as `-(-x)` — a *positive* credit delta — and slipped past the prepaid
+  hard-stop (a negative cost only raises the projected balance). `record_usage`
+  now rejects a negative `cost_usd` with a `ValueError`, and `/v1/usage` returns
+  `400` for a negative or non-numeric `cost_usd` before any event is recorded.
+  Genuine corrections/credits must go through the explicit adjust/grant/refund
+  ledger path, never metering.
+
 ### Changed
 - **Prepaid credit hard-stop is now ON by default (#28).** `pricing
   .block_over_balance` defaults to `true`, so a prepaid org can no longer debit
