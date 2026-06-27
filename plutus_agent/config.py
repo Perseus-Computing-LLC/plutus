@@ -97,6 +97,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "rate_per_min": 600,
         "burst": 600,
     },
+    "admin": {
+        # Fix #66: token-scoped admin API under /v1/admin for scripting tenant
+        # management (orgs, credits, keys). Empty token => the admin API is
+        # DISABLED (returns 404). Prefer the PLUTUS_ADMIN_TOKEN env var over file.
+        "token": "",
+    },
     "pricing": {
         # Override provider price tables here, shaped:
         # overrides: { anthropic: { claude-opus-4-8: {input: 15, output: 75} } }
@@ -265,6 +271,8 @@ def load() -> dict:
         cfg["billing"]["stripe_price_pro"] = env["STRIPE_PRICE_PRO"]
     if env.get("PLUTUS_SMTP_PASSWORD"):
         cfg["alerts"]["smtp_password"] = env["PLUTUS_SMTP_PASSWORD"]
+    if env.get("PLUTUS_ADMIN_TOKEN"):
+        cfg.setdefault("admin", {})["token"] = env["PLUTUS_ADMIN_TOKEN"]
     if env.get("PLUTUS_PORT"):
         try:
             cfg["server"]["port"] = int(env["PLUTUS_PORT"])
@@ -304,6 +312,7 @@ def _strip_env_secrets(cfg: dict) -> dict:
         ("billing", "stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
         ("alerts", "smtp_password", "PLUTUS_SMTP_PASSWORD"),
         ("auth", "google_client_secret", "PLUTUS_GOOGLE_CLIENT_SECRET"),
+        ("admin", "token", "PLUTUS_ADMIN_TOKEN"),
     ]
     for section, key, envvar in pairs:
         val = out.get(section, {}).get(key)

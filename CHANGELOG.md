@@ -5,6 +5,13 @@ All notable changes to Plutus are documented here.
 ## [Unreleased]
 
 ### Added
+- **Token-scoped admin API (#66, part 2).** A new `/v1/admin/*` surface lets an
+  operator script tenant management instead of using the CLI/dashboard only:
+  `GET/POST /v1/admin/orgs` (list / create), `POST /v1/admin/credits`
+  (`grant`/`adjust` ledger entries), and `GET/POST /v1/admin/keys` (list /
+  mint — the secret is returned once). Gated by a single `admin.token`
+  (env `PLUTUS_ADMIN_TOKEN`, masked from saved config, constant-time compared);
+  with no token configured the API is disabled and returns `404`.
 - **Self-serve spend export + cursor pagination (#66, part 1).** New
   `GET /v1/usage/export.csv` and `export.json` (Bearer-authenticated, org-scoped,
   optional `?since`/`?until` epoch bounds) let a customer pull their own usage

@@ -26,6 +26,7 @@ from . import api, views, auth as authmod
 _PUBLIC_PATHS = {"/healthz", "/favicon.ico", "/webhook/stripe", "/pricing",
                  "/v1/usage",  # authenticated by its own Bearer API key, not a session
                  "/v1/usage/export.csv", "/v1/usage/export.json",  # Bearer-auth (#66)
+                 "/v1/admin/orgs", "/v1/admin/credits", "/v1/admin/keys",  # admin-token (#66)
                  "/auth/login", "/auth/callback", "/auth/logout"}
 
 # Max request body size (1 MiB) — protects /v1/usage and /webhook/stripe from DoS
@@ -346,6 +347,8 @@ class Handler(BaseHTTPRequestHandler):
                     before=_qs_int(q, "before", None, lo=1, hi=2**63 - 1)))
             if path in ("/v1/usage/export.csv", "/v1/usage/export.json"):
                 return self._usage_export(conn, path, q)
+            if path.startswith("/v1/admin/"):
+                return self._admin_get(conn, path, q)
             if path in ("/billing/success", "/billing/cancel"):
                 ok = path.endswith("success")
                 return self._send(200, views.simple_page(
@@ -403,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._keys_create(conn)
             if path == "/keys/revoke":
                 return self._keys_revoke(conn)
+            if path.startswith("/v1/admin/"):
+                return self._admin_post(conn, path)
             return self._json(404, {"error": f"no route for {path}"})
         except _BodyTooLarge:
             return self._json(413, {"error": "request body too large"})
@@ -636,6 +641,102 @@ class Handler(BaseHTTPRequestHandler):
         if idem_key:
             db.store_idempotency_response(conn, org_id, idem_key, code, json.dumps(body))
         return self._json(code, body)
+
+    # ---- admin API (token-scoped; #66) -------------------------------------
+    def _admin_auth(self):
+        """Tri-state admin-token check. None = disabled (no token configured),
+        False = present but wrong, True = authorized. Constant-time compare."""
+        tok = (self.ctx.cfg.get("admin", {}).get("token") or "").strip()
+        if not tok:
+            return None
+        h = self.headers.get("Authorization", "")
+        if h[:7].lower() != "bearer ":
+            return False
+        return secrets.compare_digest(h[7:].strip(), tok)
+
+    def _admin_gate(self):
+        """Return True if the request is an authorized admin call, else send the
+        appropriate response (404 when disabled, 401 when the token is wrong)."""
+        st = self._admin_auth()
+        if st is None:
+            self._json(404, {"error": "admin API not enabled"})
+            return False
+        if not st:
+            self._json(401, {"error": "invalid admin token"})
+            return False
+        return True
+
+    def _admin_get(self, conn, path, q):
+        if not self._admin_gate():
+            return
+        if path == "/v1/admin/orgs":
+            return self._json(200, {"orgs": api.orgs_json(
+                conn, limit=_qs_int(q, "limit", 100, lo=1, hi=1000),
+                offset=_qs_int(q, "offset", 0, lo=0, hi=10_000_000) or 0)})
+        if path == "/v1/admin/keys":
+            org_id = (q.get("org") or [None])[0]
+            if not org_id or not db.get_org(conn, org_id):
+                return self._json(404, {"error": "unknown org"})
+            keys = [{"id": k["id"], "name": k["name"], "prefix": k["prefix"],
+                     "created_at": k["created_at"], "last_used_at": k["last_used_at"],
+                     "revoked_at": k["revoked_at"]}
+                    for k in db.list_api_keys(conn, org_id, include_revoked=True)]
+            return self._json(200, {"org_id": org_id, "keys": keys})
+        return self._json(404, {"error": f"no admin route for {path}"})
+
+    def _admin_post(self, conn, path):
+        if not self._admin_gate():
+            return
+        try:
+            payload = json.loads(self._body() or b"{}")
+        except Exception:
+            return self._json(400, {"error": "body must be JSON"})
+        if not isinstance(payload, dict):
+            return self._json(400, {"error": "body must be a JSON object"})
+
+        if path == "/v1/admin/orgs":
+            name = (payload.get("name") or "").strip()
+            if not name:
+                return self._json(400, {"error": "name is required"})
+            tier = (payload.get("tier") or "free").strip().lower()
+            if tier not in ("free", "pro", "enterprise"):
+                return self._json(400, {"error": "tier must be free|pro|enterprise"})
+            org = db.create_org(conn, name, tier=tier)
+            return self._json(201, {"id": org["id"], "name": org["name"],
+                                    "slug": org["slug"], "tier": org["tier"]})
+
+        if path == "/v1/admin/credits":
+            org_id = payload.get("org_id")
+            if not org_id or not db.get_org(conn, org_id):
+                return self._json(404, {"error": "unknown org"})
+            kind = (payload.get("kind") or "grant").strip().lower()
+            if kind not in ("grant", "adjust"):
+                return self._json(400, {"error": "kind must be grant|adjust"})
+            try:
+                amount = float(payload.get("amount_usd"))
+            except (TypeError, ValueError):
+                return self._json(400, {"error": "amount_usd must be a number"})
+            if not math.isfinite(amount) or amount == 0:
+                return self._json(400, {"error": "amount_usd must be a non-zero finite number"})
+            if kind == "grant" and amount < 0:
+                return self._json(400, {"error": "a grant must be positive; use kind=adjust to debit"})
+            row = db.add_ledger(conn, org_id, amount, kind,
+                                reason=(payload.get("reason") or f"admin {kind}"))
+            return self._json(201, {"org_id": org_id, "kind": kind,
+                                    "amount_usd": amount,
+                                    "balance_after": float(row["balance_after"])})
+
+        if path == "/v1/admin/keys":
+            org_id = payload.get("org_id")
+            if not org_id or not db.get_org(conn, org_id):
+                return self._json(404, {"error": "unknown org"})
+            name = (payload.get("name") or "").strip() or None
+            key_row, secret = db.create_api_key(conn, org_id, name=name)
+            # The secret is returned ONCE and never recoverable afterward.
+            return self._json(201, {"id": key_row["id"], "org_id": org_id,
+                                    "name": name, "secret": secret})
+
+        return self._json(404, {"error": f"no admin route for {path}"})
 
     # ---- API keys (session-gated; created from the dashboard) --------------
     def _keys_create(self, conn):
