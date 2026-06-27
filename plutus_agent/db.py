@@ -27,7 +27,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 4
+# Bump on every schema change; stamped into meta('schema_version'). Within the
+# 1.0 line, changes are ADDITIVE only (new tables / nullable or defaulted columns)
+# so an older reader keeps working — see docs/schema.md for the forward-compat
+# contract. 5 = adds the ingest_idempotency table (#65).
+SCHEMA_VERSION = 5
 
 # ---- money: integer micro-dollars ------------------------------------------
 # All money is stored as integer micro-dollars (1 USD == MICROS_PER_USD micros).
@@ -234,7 +238,31 @@ def immediate(conn: sqlite3.Connection):
         conn.isolation_level = prev
 
 
+def get_schema_version(conn) -> Optional[int]:
+    """The schema version stamped in this database, or None for a DB that predates
+    the meta table / has never been initialized."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    except sqlite3.Error:
+        return None
+    try:
+        return int(row["value"]) if row else None
+    except (TypeError, ValueError):
+        return None
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
+    # Forward-compat guard: refuse a database written by a NEWER Plutus rather
+    # than silently running old code against a future schema (which could corrupt
+    # money data). Within the 1.0 line schema changes are additive, so an equal-or-
+    # older stored version is always safe to bring forward. See docs/schema.md.
+    existing = get_schema_version(conn)
+    if existing is not None and existing > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema_version {existing} is newer than this Plutus "
+            f"supports ({SCHEMA_VERSION}); upgrade the package before opening it"
+        )
     _migrate_money_to_micros(conn)
     conn.executescript(SCHEMA)
     _migrate_add_columns(conn)

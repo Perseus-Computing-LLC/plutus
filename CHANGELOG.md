@@ -4,6 +4,18 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Added
+- **OpenAPI 3.1 spec for `/v1/*` + the forward-compatibility contract (#67).**
+  [`openapi.yaml`](openapi.yaml) documents the frozen `/v1` surface (usage ingest,
+  spend export, admin) that Perseus/Mimir build against. [`docs/schema.md`](docs/schema.md)
+  states the database forward-compat policy (additive-only within 1.x; breaking
+  changes need a new major), and [`docs/postgres.md`](docs/postgres.md) records the
+  ADR keeping the single-file SQLite backend for 1.0 while documenting the
+  Postgres migration shape. `db.SCHEMA_VERSION` bumped to 5 (the
+  `ingest_idempotency` table); `init_schema` now refuses to open a database
+  written by a newer Plutus, and `db.get_schema_version()` reads the stamped
+  version.
+
 ### Security
 - **CSRF synchronizer token as defense-in-depth (#58).** State-changing
   dashboard POSTs now accept a per-session CSRF token in addition to the existing
