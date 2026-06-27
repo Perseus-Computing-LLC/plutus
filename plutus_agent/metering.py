@@ -103,6 +103,14 @@ def record_usage(conn, org_id: str, provider: str,
     """
     ts = ts if ts is not None else time.time()
 
+    # Fix #80: never let a negative token count through — it would rewind the
+    # month-to-date tracked total (bypassing the free-tier quota) and corrupt
+    # every SUM(tokens) aggregate. Authoritative guard; the /v1/usage boundary
+    # also rejects negatives with a 400 before reaching here.
+    if (int(input_tokens) < 0 or int(output_tokens) < 0
+            or int(cache_read_tokens) < 0 or int(reasoning_tokens) < 0):
+        raise ValueError("token counts must be non-negative")
+
     org = db.get_org(conn, org_id)
     limit = pricing.tier(org["tier"]).tracked_tokens_month if org else None
     event_tokens = (int(input_tokens) + int(output_tokens)
