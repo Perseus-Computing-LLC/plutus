@@ -463,6 +463,7 @@ def pricing_page(*, stripe_status: dict, org_id: str | None = None,
   <a class="pill" href="/">← Dashboard</a></div>
 <div class="grid cards" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">{grid}</div>
 <div class="foot">All plans are self-hostable. Stripe handles billing; cancel anytime from the customer portal.<br>
+  Cost estimates use public list prices as of {_e(pricing.PRICE_TABLE_AS_OF)}; pass an exact <code>cost_usd</code> or calibrate for billing-grade accuracy.<br>
   Perseus Computing LLC · <a href="https://perseus.observer/plutus/">perseus.observer/plutus</a></div>
 </div></body></html>"""
 
