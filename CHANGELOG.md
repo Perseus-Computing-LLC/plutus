@@ -4,6 +4,20 @@ All notable changes to Plutus are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Stripe refunds, disputes, and failed payments now reverse the ledger
+  (#60).** The webhook handler previously ignored every reversal event, so a
+  refunded or charged-back prepaid top-up left the credit on Plutus's
+  append-only ledger forever. New handlers: `charge.refunded` posts a negative
+  `refund` entry (converging to the charge's cumulative `amount_refunded`, so
+  partial/repeat refunds reverse exactly once); `charge.dispute.created` /
+  `charge.dispute.funds_withdrawn` post a negative `adjust` for the disputed
+  amount (both events for one dispute converge to a single reversal); and
+  `invoice.payment_failed` is recorded as a dunning alert. Top-ups are now keyed
+  on the PaymentIntent so a dispute (which carries no customer) maps back to its
+  org. Reversals converge to a target amount per Stripe reference on top of the
+  existing per-event idempotency, so replays can't double-reverse.
+
 ### Security
 - **Negative `cost_usd` can no longer mint prepaid credit or bypass the hard-stop
   (#61).** A caller-supplied negative `cost_usd` previously flowed to the ledger
