@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plutus-agent"
-version = "0.7.0"
+# Single-sourced from plutus_agent.__version__ (#57) so the wheel metadata and
+# `plutus version` can never drift apart.
+dynamic = ["version"]
 description = "The billing layer for AI agents — self-hosted, Stripe-integrated usage metering and prepaid-credit billing for LLM/agent spend."
 readme = "README.md"
 license = { text = "MIT" }
@@ -46,6 +48,9 @@ Issues = "https://github.com/Perseus-Computing-LLC/plutus/issues"
 
 [project.scripts]
 plutus = "plutus_agent.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "plutus_agent.__version__" }
 
 [tool.setuptools]
 # The repo also contains the production monitor (plutus.py / plutus_route.py) at
