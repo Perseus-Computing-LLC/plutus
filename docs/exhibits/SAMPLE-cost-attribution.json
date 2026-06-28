@@ -1,0 +1,98 @@
+{
+  "attribution": {
+    "approaches": {
+      "agentic": {
+        "calls": [
+          {
+            "cache_read_tokens": 0,
+            "input_tokens": 1000,
+            "label": "gather-0",
+            "model": "claude-opus-4-8",
+            "output_tokens": 120,
+            "provider": "anthropic",
+            "reasoning_tokens": 0
+          },
+          {
+            "cache_read_tokens": 0,
+            "input_tokens": 2000,
+            "label": "gather-1",
+            "model": "claude-opus-4-8",
+            "output_tokens": 120,
+            "provider": "anthropic",
+            "reasoning_tokens": 0
+          },
+          {
+            "cache_read_tokens": 0,
+            "input_tokens": 3000,
+            "label": "gather-2",
+            "model": "claude-opus-4-8",
+            "output_tokens": 120,
+            "provider": "anthropic",
+            "reasoning_tokens": 0
+          },
+          {
+            "cache_read_tokens": 0,
+            "input_tokens": 4000,
+            "label": "gather-3",
+            "model": "claude-opus-4-8",
+            "output_tokens": 120,
+            "provider": "anthropic",
+            "reasoning_tokens": 0
+          },
+          {
+            "cache_read_tokens": 0,
+            "input_tokens": 5000,
+            "label": "gather-4",
+            "model": "claude-opus-4-8",
+            "output_tokens": 120,
+            "provider": "anthropic",
+            "reasoning_tokens": 0
+          },
+          {
+            "cache_read_tokens": 0,
+            "input_tokens": 6000,
+            "label": "final-answer",
+            "model": "claude-opus-4-8",
+            "output_tokens": 400,
+            "provider": "anthropic",
+            "reasoning_tokens": 0
+          }
+        ],
+        "cost_usd": 0.39,
+        "input_tokens": 21000,
+        "output_tokens": 1000,
+        "round_trips": 6
+      },
+      "resolve_before_context": {
+        "calls": [
+          {
+            "cache_read_tokens": 0,
+            "input_tokens": 6000,
+            "label": "single-shot",
+            "model": "claude-opus-4-8",
+            "output_tokens": 400,
+            "provider": "anthropic",
+            "reasoning_tokens": 0
+          }
+        ],
+        "cost_usd": 0.12,
+        "input_tokens": 6000,
+        "output_tokens": 400,
+        "round_trips": 1
+      }
+    },
+    "price_table_as_of": "2026-06-26",
+    "reduction": {
+      "cost_pct": 69.23,
+      "cost_usd_saved": 0.27,
+      "round_trips_eliminated": 5,
+      "round_trips_pct": 83.33
+    },
+    "task": "six-directive-context"
+  },
+  "deterministic": true,
+  "exhibit": "cost-attribution",
+  "generated_at": "2026-06-28T00:00:00Z",
+  "price_table_as_of": "2026-06-26",
+  "supports": "Perseus resolve-before-context patent (\u00a7101 technical effect)"
+}
