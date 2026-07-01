@@ -11,7 +11,7 @@ ledger is now an auditable mirror of Stripe (refunds, disputes, and failed
 payments reverse it idempotently); every money- and quota-bearing input is
 guarded; ingest and auth are hardened; self-serve export and a token-scoped admin
 API are in; and the `/v1` OpenAPI spec plus the DB forward-compatibility policy
-are published as the frozen contract Perseus and Mneme build against. An internal
+are published as the frozen contract Perseus and Perseus Vault build against. An internal
 security review (documented in `docs/security-review-2026-06-27.md`) cleared the
 money/auth/tenant surfaces; an external review remains the gate before any public
 launch.
@@ -27,7 +27,7 @@ launch.
 ### Added
 - **OpenAPI 3.1 spec for `/v1/*` + the forward-compatibility contract (#67).**
   [`openapi.yaml`](openapi.yaml) documents the frozen `/v1` surface (usage ingest,
-  spend export, admin) that Perseus/Mneme build against. [`docs/schema.md`](docs/schema.md)
+  spend export, admin) that Perseus/Perseus Vault build against. [`docs/schema.md`](docs/schema.md)
   states the database forward-compat policy (additive-only within 1.x; breaking
   changes need a new major), and [`docs/postgres.md`](docs/postgres.md) records the
   ADR keeping the single-file SQLite backend for 1.0 while documenting the

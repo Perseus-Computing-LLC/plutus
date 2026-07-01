@@ -6,7 +6,7 @@ info:
     The Plutus `/v1` HTTP API — usage ingest, spend export, and operator admin
     for the self-hostable LLM-spend billing engine.
 
-    **This document is the frozen 1.0 contract.** Perseus and Mneme build against
+    **This document is the frozen 1.0 contract.** Perseus and Perseus Vault build against
     it; within the 1.0 major line it changes only additively (new optional fields,
     new endpoints). Breaking changes require a `/v2`. See `docs/SCHEMA.md` for the
     paired database forward-compatibility policy.

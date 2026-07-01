@@ -111,7 +111,7 @@ Priority tests, in order:
 
 ### Standalone OSS "LLM FinOps" positioning
 - Launch post, comparison page, "awesome-llm-ops" listing
-- Decouple from Perseus/Mneme/Minions toolset branding
+- Decouple from Perseus/Perseus Vault/Minions toolset branding
 
 ## Design principles (non-negotiable)
 1. **Never lose a key.** Config writes back up first and refuse to drop any provider block or API key.
