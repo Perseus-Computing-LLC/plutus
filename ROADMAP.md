@@ -9,8 +9,8 @@
 
 Plutus (Greek god of wealth) is a credit & spend monitor and runway-based model router
 for Hermes Agent. It tracks money draining from LLM providers and automatically rebalances
-routing toward the provider with the most projected days-left. Part of the Perseus / Mimir /
-Mneme / Minions toolset.
+routing toward the provider with the most projected days-left. Part of the Perseus / Mneme /
+Minions toolset.
 
 Tracks three providers today: **deepseek, anthropic, google**.
 
@@ -132,7 +132,7 @@ Tracks three providers today: **deepseek, anthropic, google**.
 - Enterprise SSO (SAML/OIDC) for the Plutus dashboard.
 
 ### v3.3 — Usage-Based Billing for Managed Services (Q2 2030)
-- Metered billing for Mimir Cloud + Perseus Cloud: per-entity, per-render, per-synthesis-call.
+- Metered billing for Mneme Cloud + Perseus Cloud: per-entity, per-render, per-synthesis-call.
 - Free tier: 10K entities, 100 renders/day, 10 syntheses/day.
 - Pro tier: unlimited entities, 1K renders/day, 100 syntheses/day.
 - Enterprise: custom limits, SLA, dedicated infrastructure.
