@@ -51,7 +51,7 @@ The deep-review findings that can corrupt billing data. Root cause for most: rea
 - *Exit:* an external security-review pass on the public surface.
 
 ### v0.7.1 — Foundation hardening  *(carryover + hygiene; precondition to v0.8)*
-A 2026-06-26 foundation review verified v0.6/v0.7 against `main`. Most fixes landed; the items below were closed but only partially resolved, plus new hygiene gaps. Close these before the v0.8 feature work — 1.0 is the convergence gate for Perseus/Mneme, so the contract must be honest and stable first.
+A 2026-06-26 foundation review verified v0.6/v0.7 against `main`. Most fixes landed; the items below were closed but only partially resolved, plus new hygiene gaps. Close these before the v0.8 feature work — 1.0 is the convergence gate for Perseus/Perseus Vault, so the contract must be honest and stable first.
 - **#28** prepaid hard-stop: default-on for prepaid orgs + enforce *inside* the debit transaction (currently off-by-default and racy).
 - **#30** atomic `balance_after` + free-tier quota race: wrap the ledger read-modify-write in `BEGIN IMMEDIATE` (or one conditional `INSERT…SELECT`).
 - **#32** CSRF: fail closed in `_same_origin` when `base_url` is unset, and/or add a per-session token.
@@ -110,4 +110,4 @@ Already done: README reframed, `pip install plutus-agent`, GHCR image, hosted da
 | Docs | README + 3 docs | full reference + guides |
 
 ## Sequencing note
-v0.6 and v0.7 **shipped** (0.6.0 / 0.7.0), but the 2026-06-26 review surfaced partial fixes + hygiene gaps now collected in **v0.7.1 — Foundation hardening**. Close v0.7.1 before any public push and before wiring Plutus into Perseus/Mneme (the convergence-gated-on-1.0 decision). v0.8 (Team tier + integrations) is the revenue/distribution lever and can proceed in parallel, but the 1.0 tag waits on v0.7.1 + an external security-review pass + a frozen API/schema.
+v0.6 and v0.7 **shipped** (0.6.0 / 0.7.0), but the 2026-06-26 review surfaced partial fixes + hygiene gaps now collected in **v0.7.1 — Foundation hardening**. Close v0.7.1 before any public push and before wiring Plutus into Perseus/Perseus Vault (the convergence-gated-on-1.0 decision). v0.8 (Team tier + integrations) is the revenue/distribution lever and can proceed in parallel, but the 1.0 tag waits on v0.7.1 + an external security-review pass + a frozen API/schema.
